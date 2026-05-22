@@ -1,5 +1,9 @@
 # skillinject
 
+[![ci](https://github.com/pilot-protocol/skillinject/actions/workflows/ci.yml/badge.svg)](https://github.com/pilot-protocol/skillinject/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/pilot-protocol/skillinject/branch/main/graph/badge.svg)](https://codecov.io/gh/pilot-protocol/skillinject)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 Skill injector plugin for the Pilot Protocol daemon. Installs and keeps
 current the `SKILL.md` files in each detected agent tool's well-known
 directory (Claude Code, OpenClaw, PicoClaw, OpenHands, Hermes).
@@ -43,3 +47,7 @@ _ = report
 | Tag | Effect |
 |---|---|
 | `no_skillinject` | Compiles a stub that does nothing. |
+
+## License
+
+AGPL-3.0-or-later. See [LICENSE](LICENSE).
