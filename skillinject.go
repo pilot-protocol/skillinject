@@ -21,12 +21,22 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
 // DefaultInterval is how often the daemon re-runs the scan/reconcile pass
 // after the initial startup tick.
 const DefaultInterval = 15 * time.Minute
+
+// tickMu serializes concurrent Tick() invocations against the same
+// process. Without it, two ticks racing (timer + external pilotctl
+// invocation, or rapid retries) each take their own snapshot of
+// openclaw.json, mutate it, and swap independently — second swap
+// silently overwrites the first's changes. The mutex is the smallest
+// fix; the cost is one mutex hold per ~15-min reconcile, which is
+// negligible.
+var tickMu sync.Mutex
 
 // Config tunes the injector. Zero values use sensible defaults.
 type Config struct {
@@ -75,6 +85,9 @@ func Run(ctx context.Context, cfg Config) {
 // (persisted in ~/.pilot/config.json), Tick returns an empty report
 // without touching disk or the network.
 func Tick(ctx context.Context, cfg Config) (*Report, error) {
+	tickMu.Lock()
+	defer tickMu.Unlock()
+
 	home := cfg.Home
 	if home == "" {
 		h, err := os.UserHomeDir()

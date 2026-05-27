@@ -162,7 +162,11 @@ func mergePluginAllowList(configPath, allowJsonPath, entriesJsonPath, pluginID s
 	// (no risk of data loss anyway).
 	if originalExisted && !bytes.Equal(originalBytes, next) {
 		bakPath := configPath + BackupSuffix
-		if err := writeFileAtomic(bakPath, originalBytes, 0o644); err != nil {
+		// 0o600: the backup mirrors openclaw.json byte-for-byte and
+		// may contain operator credentials (API keys, tokens). Only
+		// this process reads it (the rollback path); on uninstall
+		// it's removed. Wider modes leaked secrets to any local user.
+		if err := writeFileAtomic(bakPath, originalBytes, 0o600); err != nil {
 			return fmt.Errorf("write pre-merge backup: %w", err)
 		}
 	}
