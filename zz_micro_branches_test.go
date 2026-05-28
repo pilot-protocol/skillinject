@@ -35,7 +35,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TeoSlayer/pilotprotocol/pkg/coreapi"
+	"github.com/pilot-protocol/common/coreapi"
 )
 
 // verifyMarshalRoundTrip: bytes have our id in allow but the entry

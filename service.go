@@ -13,7 +13,7 @@ package skillinject
 
 import (
 	"context"
-	"github.com/TeoSlayer/pilotprotocol/pkg/coreapi"
+	"github.com/pilot-protocol/common/coreapi"
 )
 
 
