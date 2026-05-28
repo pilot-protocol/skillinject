@@ -4,6 +4,7 @@ package skillinject
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -124,6 +125,7 @@ type fetcher struct {
 	httpClient  *http.Client
 	manifestURL string
 	repoBase    string
+	publicKey   ed25519.PublicKey // nil = skip verification (backward compat)
 }
 
 func newFetcher(cfg Config) *fetcher {
@@ -142,7 +144,7 @@ func newFetcher(cfg Config) *fetcher {
 	if !strings.HasSuffix(rb, "/") {
 		rb += "/"
 	}
-	return &fetcher{httpClient: c, manifestURL: mu, repoBase: rb}
+	return &fetcher{httpClient: c, manifestURL: mu, repoBase: rb, publicKey: cfg.ManifestPublicKey}
 }
 
 func (f *fetcher) get(ctx context.Context, url string) ([]byte, error) {
@@ -165,7 +167,7 @@ func (f *fetcher) get(ctx context.Context, url string) ([]byte, error) {
 
 // fetchManifest grabs and parses the manifest from the configured URL.
 func (f *fetcher) fetchManifest(ctx context.Context) (*Manifest, error) {
-	body, err := f.get(ctx, f.manifestURL)
+	body, err := f.getOrVerify(ctx, f.manifestURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch manifest: %w", err)
 	}
@@ -190,7 +192,29 @@ func (f *fetcher) fetchManifest(ctx context.Context) (*Manifest, error) {
 func (f *fetcher) fetchRepoFile(ctx context.Context, relPath string) ([]byte, error) {
 	relPath = strings.TrimPrefix(relPath, "/")
 	url := f.repoBase + relPath
-	return f.get(ctx, url)
+	return f.getOrVerify(ctx, url)
+}
+
+// getOrVerify returns the body at url. When f.publicKey is set, it also
+// fetches <url>.sig and verifies the detached Ed25519 signature before
+// returning. Without a public key, behavior matches get() exactly
+// (backward compatible).
+func (f *fetcher) getOrVerify(ctx context.Context, url string) ([]byte, error) {
+	body, err := f.get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	if f.publicKey == nil {
+		return body, nil
+	}
+	sig, err := f.get(ctx, url+".sig")
+	if err != nil {
+		return nil, fmt.Errorf("fetch signature %s.sig: %w", url, err)
+	}
+	if !ed25519.Verify(f.publicKey, body, sig) {
+		return nil, fmt.Errorf("ed25519 signature verification failed for %s", url)
+	}
+	return body, nil
 }
 
 // expandHome resolves "~/" in a manifest path against the user's home dir.

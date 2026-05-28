@@ -14,6 +14,7 @@ package skillinject
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -51,6 +52,11 @@ type Config struct {
 	RepoBaseURL string
 	// HTTPClient overrides the HTTP client used for fetching.
 	HTTPClient *http.Client
+	// ManifestPublicKey, when set, enables Ed25519 detached-signature
+	// verification on manifest + all fetched repo files. The daemon
+	// fetches <url>.sig alongside each resource and verifies before
+	// accepting. Nil (default) preserves the pre-verification behavior.
+	ManifestPublicKey ed25519.PublicKey
 }
 
 // Run blocks running scan/reconcile ticks until ctx is cancelled. The
