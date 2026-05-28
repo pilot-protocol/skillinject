@@ -29,6 +29,7 @@ package skillinject
 
 import (
 	"context"
+	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -327,6 +328,100 @@ func TestReconcilePluginAllowList_IdenticalNoop(t *testing.T) {
 	got, _ := os.ReadFile(cfgPath)
 	if string(got) != string(body) {
 		t.Errorf("file was mutated despite noop classification:\nwant=%q\ngot =%q", body, got)
+	}
+}
+
+// getOrVerify: with a valid public key, fetches file + .sig and verifies.
+func TestFetchManifest_WithValidSignature(t *testing.T) {
+	t.Parallel()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	body := []byte(`{"version": 1, "entrypoint": "x", "tools": [{"name":"x"}]}`)
+	sig := ed25519.Sign(priv, body)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sig") {
+			_, _ = w.Write(sig)
+		} else {
+			_, _ = w.Write(body)
+		}
+	}))
+	defer srv.Close()
+
+	f := newFetcher(Config{
+		ManifestURL:       srv.URL + "/m.json",
+		ManifestPublicKey: pub,
+	})
+	m, err := f.fetchManifest(context.Background())
+	if err != nil {
+		t.Fatalf("expected success with valid signature; got %v", err)
+	}
+	if m.Version != 1 {
+		t.Errorf("version = %d; want 1", m.Version)
+	}
+}
+
+// getOrVerify: wrong public key → signature verification fails.
+func TestFetchManifest_WrongPublicKeyFails(t *testing.T) {
+	t.Parallel()
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	wrongPub, _, _ := ed25519.GenerateKey(nil)
+
+	body := []byte(`{"version": 1, "entrypoint": "x", "tools": [{"name":"x"}]}`)
+	sig := ed25519.Sign(priv, body)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sig") {
+			_, _ = w.Write(sig)
+		} else {
+			_, _ = w.Write(body)
+		}
+	}))
+	defer srv.Close()
+
+	f := newFetcher(Config{
+		ManifestURL:       srv.URL + "/m.json",
+		ManifestPublicKey: wrongPub,
+	})
+	_, err = f.fetchManifest(context.Background())
+	if err == nil {
+		t.Fatal("expected signature verification failure")
+	}
+	if !strings.Contains(err.Error(), "signature verification failed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// getOrVerify: missing .sig file returns a wrapped fetch error.
+func TestFetchManifest_MissingSigFileErrors(t *testing.T) {
+	t.Parallel()
+	pub, _, _ := ed25519.GenerateKey(nil)
+	body := []byte(`{"version": 1, "entrypoint": "x", "tools": [{"name":"x"}]}`)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sig") {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	f := newFetcher(Config{
+		ManifestURL:       srv.URL + "/m.json",
+		ManifestPublicKey: pub,
+	})
+	_, err := f.fetchManifest(context.Background())
+	if err == nil {
+		t.Fatal("expected error when .sig is missing")
+	}
+	if !strings.Contains(err.Error(), "fetch signature") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
