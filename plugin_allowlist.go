@@ -254,10 +254,9 @@ func verifyOnDiskResult(configPath string, originalTopKeys map[string]struct{}, 
 // the leaf key. Returns nil + empty string if any intermediate node is
 // not a JSON object and create is false.
 func walkObject(obj map[string]any, jsonPath string, create bool) (map[string]any, string) {
+	// strings.Split always returns at least one element (an empty string
+	// when jsonPath is ""), so a len(parts) == 0 guard is unreachable.
 	parts := strings.Split(jsonPath, ".")
-	if len(parts) == 0 {
-		return nil, ""
-	}
 	cur := obj
 	for i := 0; i < len(parts)-1; i++ {
 		p := parts[i]
@@ -297,10 +296,10 @@ func allowListContains(obj map[string]any, jsonPath, id string) bool {
 }
 
 func ensureAllowListEntry(obj map[string]any, jsonPath, id string) error {
+	// walkObject with create=true always returns a non-nil parent (it
+	// materialises any missing intermediate object), so a nil check here
+	// would be unreachable.
 	parent, leaf := walkObject(obj, jsonPath, true)
-	if parent == nil {
-		return fmt.Errorf("walk allow-list path %q: parent missing", jsonPath)
-	}
 	cur, _ := parent[leaf].([]any)
 	for _, v := range cur {
 		if s, ok := v.(string); ok && s == id {
@@ -329,10 +328,10 @@ func entryEnabled(obj map[string]any, jsonPath, id string) bool {
 }
 
 func ensureEntryEnabled(obj map[string]any, jsonPath, id string) error {
+	// walkObject with create=true always returns a non-nil parent (it
+	// materialises any missing intermediate object), so a nil check here
+	// would be unreachable.
 	parent, leaf := walkObject(obj, jsonPath, true)
-	if parent == nil {
-		return fmt.Errorf("walk entries path %q: parent missing", jsonPath)
-	}
 	entries, ok := parent[leaf].(map[string]any)
 	if !ok {
 		entries = map[string]any{}

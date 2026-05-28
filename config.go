@@ -60,15 +60,12 @@ func SetEnabled(home string, enabled bool) error {
 	if b, err := os.ReadFile(p); err == nil {
 		_ = json.Unmarshal(b, &raw)
 	}
-	flagJSON, err := json.Marshal(EnabledFlag{Enabled: enabled})
-	if err != nil {
-		return err
-	}
+	// EnabledFlag is all-primitive — json.Marshal cannot fail.
+	flagJSON, _ := json.Marshal(EnabledFlag{Enabled: enabled})
 	raw[configKey] = flagJSON
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return err
-	}
+	// All values in raw are valid json.RawMessage (either freshly marshaled
+	// above, or from a successful Unmarshal upstream) — MarshalIndent cannot fail.
+	out, _ := json.MarshalIndent(raw, "", "  ")
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return err

@@ -297,12 +297,10 @@ func removePluginAllowListEntry(p *ManifestPlugin, cfgPath string) Removal {
 		return r
 	}
 
-	next, err := json.MarshalIndent(obj, "", "  ")
-	if err != nil {
-		r.Action = RemovalError
-		r.Err = err.Error()
-		return r
-	}
+	// obj came from json.Unmarshal of a known-parseable config (we returned
+	// above otherwise), so every value is one of the standard library's
+	// JSON types — re-marshaling cannot fail.
+	next, _ := json.MarshalIndent(obj, "", "  ")
 	next = append(next, '\n')
 	if err := writeFileAtomic(cfgPath, next, 0o644); err != nil {
 		r.Action = RemovalError
