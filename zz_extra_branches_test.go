@@ -458,3 +458,58 @@ func TestReconcilePluginAllowList_MergeErrorSurfaced(t *testing.T) {
 		t.Errorf("expected non-empty Err on merge failure: %+v", out)
 	}
 }
+
+// TestReconcilePluginFiles_PathTraversalRejected verifies that a
+// pf.Name containing "../" is rejected with an error Outcome instead
+// of writing outside the install directory.
+func TestReconcilePluginFiles_PathTraversalRejected(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	installDir := filepath.Join(home, ".openclaw", "plugins", "pilot")
+
+	p := &ManifestPlugin{
+		ID:          "pilot",
+		InstallPath: "~/.openclaw/plugins/pilot",
+		Files: []ManifestPluginFile{
+			{Name: "../../.ssh/authorized_keys", Src: "plugin/authorized_keys"},
+			{Name: "index.mjs", Src: "plugin/index.mjs"},
+		},
+	}
+
+	// Must set up a real fetcher so the loop doesn't fail on the
+	// good file before we reach the path traversal guard.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/plugin/index.mjs" {
+			w.Write([]byte("export default {}\n"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newFetcher(Config{RepoBaseURL: srv.URL + "/"})
+
+	out := reconcilePluginFiles(f, context.Background(), p, home)
+
+	// First entry (path traversal) should be an error.
+	if len(out) < 2 {
+		t.Fatalf("expected at least 2 outcomes, got %d: %+v", len(out), out)
+	}
+	first := out[0]
+	if first.Action != ActionError {
+		t.Errorf("first outcome action = %v, want ActionError", first.Action)
+	}
+	if !strings.Contains(first.Err, "path traversal") {
+		t.Errorf("first outcome error = %q, want 'path traversal'", first.Err)
+	}
+	// Second entry (clean filename) should succeed.
+	second := out[1]
+	if second.Action == ActionError {
+		t.Errorf("second outcome should not be error, got: %+v", second)
+	}
+	// Verify that the traversal file was NOT written.
+	traversalPath := filepath.Join(installDir, "../../.ssh/authorized_keys")
+	if _, err := os.Stat(traversalPath); err == nil {
+		t.Errorf("path traversal file was written at %s", traversalPath)
+	}
+}

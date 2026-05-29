@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -262,6 +263,15 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 	out := make([]Outcome, 0, len(p.Files))
 	for _, pf := range p.Files {
 		dst := filepath.Join(installDir, pf.Name)
+		// Reject path-traversal in pf.Name (e.g. "../../.ssh/authorized_keys")
+		if clean := filepath.Clean(dst); !strings.HasPrefix(clean, filepath.Clean(installDir)+string(os.PathSeparator)) && clean != filepath.Clean(installDir) {
+			out = append(out, Outcome{
+				Tool: p.ID, Kind: KindPluginFile, Path: dst,
+				Action: ActionError,
+				Err:    fmt.Sprintf("path traversal: %q escapes install dir", pf.Name),
+			})
+			continue
+		}
 		body, err := f.fetchRepoFile(ctx, pf.Src)
 		if err != nil {
 			out = append(out, Outcome{
