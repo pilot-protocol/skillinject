@@ -120,18 +120,21 @@ func writeMarker(path, ref, short string) error {
 			current = markerRE.ReplaceAllString(current, block)
 			next = []byte(current)
 		} else {
-			// Insert at the top of the body (after any YAML frontmatter).
-			// All other user content is preserved byte-for-byte below.
+			// Append at the bottom of the file so user persona sections
+			// (e.g. SOUL.md identity, AGENTS.md workspace instructions)
+			// stay prominent at the top. The Pilot directive is placed
+			// after all user content and after any YAML frontmatter.
 			frontmatter, body := splitFrontmatter(current)
+			body = strings.TrimRight(body, "\n")
 			sep := ""
 			if frontmatter != "" && !strings.HasSuffix(frontmatter, "\n") {
 				sep = "\n"
 			}
 			bodySep := ""
-			if body != "" && !strings.HasPrefix(body, "\n") {
-				bodySep = "\n"
+			if body != "" {
+				bodySep = "\n\n"
 			}
-			next = []byte(frontmatter + sep + block + bodySep + body)
+			next = []byte(frontmatter + sep + body + bodySep + block)
 		}
 	}
 

@@ -169,11 +169,10 @@ func TestMarker_PreservesUserContent(t *testing.T) {
 	}
 
 	got := mustRead(t, hb)
-	// Marker now lives at TOP of body (not at bottom) so it dominates
-	// any competing first-action instructions later in the file. User
-	// content is preserved BELOW the marker.
-	if !strings.HasPrefix(got, "<!-- pilot:begin v=1 hash=") {
-		t.Errorf("marker block not at top of file:\n%s", got)
+	// Marker lives at the BOTTOM of the file so user persona sections
+	// stay prominent at the top. User content is preserved ABOVE the marker.
+	if !strings.HasSuffix(strings.TrimSpace(got), "<!-- pilot:end -->") {
+		t.Errorf("marker block not at bottom of file:\n%s", got)
 	}
 	if !strings.Contains(got, pre) {
 		t.Errorf("user content lost from file:\n%s", got)
@@ -203,8 +202,8 @@ func TestMarker_PreservesUserContent(t *testing.T) {
 	}
 }
 
-// Marker is injected at the top of the body (after any frontmatter) and
-// preserves all existing user content below.
+// Marker is appended at the bottom of the file (after all user content and
+// after any YAML frontmatter) preserving user persona sections at the top.
 func TestMarker_PreservesUserContentBelow(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
@@ -239,9 +238,9 @@ Some other content stays.
 			t.Errorf("user content lost (%q):\n%s", want, got)
 		}
 	}
-	// Marker is present and at the top.
-	if !strings.HasPrefix(got, "<!-- pilot:begin") {
-		t.Errorf("marker not at top of body:\n%s", got[:min(150, len(got))])
+	// Marker is present and at the bottom.
+	if !strings.HasSuffix(strings.TrimSpace(got), "<!-- pilot:end -->") {
+		t.Errorf("marker not at bottom of file:\n%s", got[len(got)-min(150,len(got)):])
 	}
 }
 
@@ -271,16 +270,7 @@ func TestMarker_PreservesYAMLFrontmatter(t *testing.T) {
 	if !strings.Contains(got, "User body.") {
 		t.Errorf("body content lost")
 	}
-	// Marker should be AFTER frontmatter, BEFORE body content.
-	idxFrontmatterEnd := strings.Index(got, "---\n") + len("---\n")
-	// Walk past possible additional ---\n
-	for strings.HasPrefix(got[idxFrontmatterEnd:], "---\n") || strings.HasPrefix(got[idxFrontmatterEnd:], "\n") {
-		if strings.HasPrefix(got[idxFrontmatterEnd:], "---\n") {
-			idxFrontmatterEnd += len("---\n")
-		} else {
-			break
-		}
-	}
+	// Marker should be AFTER frontmatter AND AFTER body content.
 	idxMarker := strings.Index(got, "<!-- pilot:begin")
 	idxBody := strings.Index(got, "# PicoClaw")
 	if idxMarker < 0 {
@@ -289,8 +279,8 @@ func TestMarker_PreservesYAMLFrontmatter(t *testing.T) {
 	if idxBody < 0 {
 		t.Fatal("body header missing")
 	}
-	if idxMarker > idxBody {
-		t.Errorf("marker should be ABOVE body but is below (marker=%d body=%d)", idxMarker, idxBody)
+	if idxMarker < idxBody {
+		t.Errorf("marker should be BELOW body but is above (marker=%d body=%d)", idxMarker, idxBody)
 	}
 }
 
