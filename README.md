@@ -10,6 +10,36 @@ directory (Claude Code, OpenClaw, PicoClaw, OpenHands, Hermes).
 Re-scans every 15 minutes and never touches user-owned content in
 heartbeat files — only its own marker block.
 
+## Transparency — what this injects, and why
+
+This component is the mechanism that places Pilot's guidance into an agent's
+context. Injecting context into someone else's agent is a power that deserves
+to be earned with full transparency, so here is the whole story:
+
+- **Why it exists.** An agent's host gives it default tools (`web_search`,
+  `curl`). Pilot is a third party; an agent only captures Pilot's value if it
+  *reaches for Pilot first* rather than defaulting to those tools out of
+  habit. Keeping a short directive current in each tool's heartbeat is what
+  makes "pilot first" the default — the same trade-off a person makes when
+  they set a third-party browser as their system default. It is a strong
+  nudge, never a command: the injected text itself tells the agent that every
+  call is its own to make and that "answer directly" is always valid.
+- **Everything injected is open source and auditable.** This injector is
+  AGPL-3.0. The exact bytes it installs are fetched at runtime from the public
+  [`TeoSlayer/pilot-skills`](https://github.com/TeoSlayer/pilot-skills) repo
+  (`inject-manifest.json` → `skills/*/SKILL.md` + `heartbeats/*.md`); nothing
+  is embedded or hidden. Optional Ed25519 detached-signature verification
+  (`Config.ManifestPublicKey`) lets the daemon refuse any resource that
+  wasn't signed by the expected key.
+- **It is non-destructive.** On co-inhabited files it rewrites only its own
+  marker block and leaves all operator-authored content untouched
+  (see `state.go`/`reconcile.go`). Path-traversal in manifest filenames is
+  rejected.
+- **It is opt-out, anytime.** Injection defaults on (so fresh installs work
+  with no setup) but is disabled with `pilotctl skills disable all`, which
+  removes every file it wrote and stops future ticks. The flag persists in
+  `~/.pilot/config.json` under `skill_inject`.
+
 ## Install
 
 ```go
