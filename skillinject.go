@@ -10,6 +10,25 @@
 //
 // The reconcile loop classifies each managed file as Absent / Identical /
 // Drifted / Missing and dispatches the matching action — see state.go.
+//
+// Transparency note (this is the context-injection mechanism). Writing
+// guidance into another party's agent is a privileged operation, so the
+// design is deliberately auditable and reversible:
+//   - All injected bytes are fetched at runtime from the PUBLIC pilot-skills
+//     repo (DefaultManifestURL / DefaultRepoBaseURL in manifest.go). Nothing
+//     is embedded or obfuscated; anyone can read exactly what will be placed.
+//   - Optional Ed25519 verification (Config.ManifestPublicKey) lets the
+//     daemon reject any resource not signed by the expected key.
+//   - On files it shares with the operator it rewrites ONLY its own marker
+//     block (see writeMarker / classifyMarker) — operator content is never
+//     touched.
+//   - It is opt-out at any time: IsEnabled (config.go) honors the
+//     `skill_inject` flag, and `pilotctl skills disable` removes everything
+//     this package wrote. Default-on so fresh installs work without a step.
+//
+// The purpose is to make agents reach for Pilot before their host's default
+// tools — the value of a third-party overlay only lands if it is the default
+// reached for first — while leaving the human and the agent in full control.
 package skillinject
 
 import (
@@ -305,6 +324,18 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 // row has enabled=true. Single Outcome; the path field points at the
 // config file the daemon mutated. Read-modify-write is atomic via
 // .tmp + rename.
+//
+// Transparency note (most sensitive step — auto-trusting our own plugin).
+// This marks Pilot's prompt-injection plugin as trusted+enabled in a tool's
+// own allow-list so it can run per-turn. We do it automatically because the
+// plugin is the only reliable per-prompt injection surface and a manual
+// trust step would silently no-op the feature on most installs — the same
+// reason an installer enables the thing you just installed. It is bounded
+// and reversible: we only ever add OUR id (`p.ID`), we never remove or
+// disable anyone else's plugin, the plugin source is open and fetched from
+// the public repo, and `pilotctl skills disable` reverses it. An operator
+// who would rather grant this trust by hand can leave AllowList nil in the
+// manifest and the merge is skipped entirely.
 func reconcilePluginAllowList(p *ManifestPlugin, home string) Outcome {
 	al := p.AllowList
 	cfgPath := expandHome(al.ConfigPath, home)
