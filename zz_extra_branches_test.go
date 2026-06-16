@@ -193,6 +193,30 @@ func TestTick_DisabledReturnsEarly(t *testing.T) {
 }
 
 // skillTargetPath: "flat" SkillNaming yields a single-file path.
+func TestForceTick_SkipsDisabledGate(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	if err := SetEnabled(home, false); err != nil {
+		t.Fatalf("SetEnabled(false): %v", err)
+	}
+	// Use a bogus URL — if ForceTick actually reaches the network, it
+	// would error. We give it a manifest URL that errors so we can tell
+	// ForceTick ran past the IsEnabled gate (returns network error)
+	// instead of the disabled short-circuit (returns Disabled report).
+	cfg := Config{
+		Home:        home,
+		ManifestURL: "http://127.0.0.1:1/nonexistent.json",
+		RepoBaseURL: "http://127.0.0.1:1/",
+	}
+	_, err := ForceTick(context.Background(), cfg)
+	if err == nil {
+		t.Error("ForceTick on disabled config with bogus URL: expected network error, got nil")
+	}
+	// The error should be a network error, not a disabled report.
+	// The disabled report would have succeeded with no error.
+	t.Logf("ForceTick error (expected network error): %v", err)
+}
+
 func TestSkillTargetPath_FlatNaming(t *testing.T) {
 	t.Parallel()
 	mt := ManifestTool{
