@@ -9,8 +9,11 @@ import (
 )
 
 // configFileName is the per-user pilot config file. The same file the
-// rest of pilotctl reads from. We only touch our own subkey.
+// rest of pilotctl reads from. We only touch known subkeys.
 const configFileName = "config.json"
+
+// configUpdateKey is the subkey under which we store the update settings.
+const configUpdateKey = "update"
 
 // configKey is the subkey under which we store the mode flag.
 const configKey = "skill_inject"
@@ -138,4 +141,69 @@ func SetEnabled(home string, enabled bool) error {
 		mode = ModeDisabled
 	}
 	return SetMode(home, mode)
+}
+
+// --- update config ---
+
+// UpdateConfig describes the runtime-tunable auto-update settings.
+// Stored at ~/.pilot/config.json under "update" → {...}.
+// Zero values leave the updater default in place.
+type UpdateConfig struct {
+	// Auto controls whether the updater checks for and applies new
+	// versions. True (default) = auto-update enabled.
+	Auto *bool `json:"auto,omitempty"`
+	// Pin locks the updater to a specific release tag (e.g. "v1.10.5").
+	// Empty string (default) means no pin — follow latest stable.
+	Pin string `json:"pin,omitempty"`
+	// Interval is the minimum time between update checks, in Go duration
+	// string format ("15m", "1h"). Empty string (default) means use the
+	// updater's built-in default check interval.
+	Interval string `json:"interval,omitempty"`
+}
+
+// GetUpdateConfig reads the update subkey from ~/.pilot/config.json.
+// Returns a zero-value UpdateConfig when the subkey is absent, so the
+// caller can apply its own defaults.
+func GetUpdateConfig(home string) UpdateConfig {
+	f, err := os.Open(configFilePath(home))
+	if err != nil {
+		return UpdateConfig{}
+	}
+	defer f.Close()
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(f).Decode(&raw); err != nil {
+		return UpdateConfig{}
+	}
+	sub, ok := raw[configUpdateKey]
+	if !ok {
+		return UpdateConfig{}
+	}
+	var cfg UpdateConfig
+	_ = json.Unmarshal(sub, &cfg)
+	return cfg
+}
+
+// SetUpdateConfig persists the update subkey. Reads the existing config
+// (if any), updates only the update key, writes back atomically.
+func SetUpdateConfig(home string, cfg UpdateConfig) error {
+	p := configFilePath(home)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	raw := map[string]json.RawMessage{}
+	if b, err := os.ReadFile(p); err == nil {
+		_ = json.Unmarshal(b, &raw)
+	}
+	cfgJSON, _ := json.Marshal(cfg)
+	raw[configUpdateKey] = cfgJSON
+	out, _ := json.MarshalIndent(raw, "", "  ")
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

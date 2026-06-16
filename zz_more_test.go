@@ -289,3 +289,124 @@ func TestService_StopWithoutStart(t *testing.T) {
 		t.Errorf("Stop without Start: %v", err)
 	}
 }
+
+func TestGetUpdateConfig_MissingFileReturnsZero(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	cfg := GetUpdateConfig(home)
+	if cfg.Auto != nil {
+		t.Error("Auto should be nil for missing config")
+	}
+	if cfg.Pin != "" {
+		t.Error("Pin should be empty for missing config")
+	}
+	if cfg.Interval != "" {
+		t.Error("Interval should be empty for missing config")
+	}
+}
+
+func TestSetUpdateConfig_RoundtripsThroughDisk(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+
+	trueVal := true
+	cfg := UpdateConfig{Auto: &trueVal, Pin: "v1.10.5", Interval: "30m"}
+	if err := SetUpdateConfig(home, cfg); err != nil {
+		t.Fatalf("SetUpdateConfig: %v", err)
+	}
+
+	got := GetUpdateConfig(home)
+	if got.Auto == nil || *got.Auto != true {
+		t.Error("Auto: want true")
+	}
+	if got.Pin != "v1.10.5" {
+		t.Errorf("Pin: want v1.10.5, got %q", got.Pin)
+	}
+	if got.Interval != "30m" {
+		t.Errorf("Interval: want 30m, got %q", got.Interval)
+	}
+}
+
+func TestSetUpdateConfig_DisableAuto(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+
+	falseVal := false
+	if err := SetUpdateConfig(home, UpdateConfig{Auto: &falseVal}); err != nil {
+		t.Fatalf("SetUpdateConfig: %v", err)
+	}
+
+	got := GetUpdateConfig(home)
+	if got.Auto == nil || *got.Auto != false {
+		t.Error("Auto: want false")
+	}
+}
+
+func TestSetUpdateConfig_PreservesOtherKeys(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, ".pilot")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"),
+		[]byte(`{"other_key":"preserved"}`), 0600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	falseVal := false
+	if err := SetUpdateConfig(home, UpdateConfig{Auto: &falseVal}); err != nil {
+		t.Fatalf("SetUpdateConfig: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(cfgDir, "config.json"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["other_key"]; !ok {
+		t.Error("other_key should be preserved across SetUpdateConfig")
+	}
+	if _, ok := raw["update"]; !ok {
+		t.Error("update key missing after SetUpdateConfig")
+	}
+}
+
+func TestUpdateAndSkillInferConfigCoexist(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+
+	// Set skill_inject first.
+	if err := SetEnabled(home, false); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+
+	// Then set update config — must not clobber skill_inject.
+	falseVal := false
+	if err := SetUpdateConfig(home, UpdateConfig{Auto: &falseVal}); err != nil {
+		t.Fatalf("SetUpdateConfig: %v", err)
+	}
+
+	if IsEnabled(home) {
+		t.Error("after SetEnabled(false): IsEnabled = true, want false")
+	}
+	got := GetUpdateConfig(home)
+	if got.Auto == nil || *got.Auto != false {
+		t.Error("Auto: want false after SetUpdateConfig")
+	}
+
+	// Set skill_inject back — must not clobber update.
+	if err := SetEnabled(home, true); err != nil {
+		t.Fatalf("SetEnabled(true): %v", err)
+	}
+	got2 := GetUpdateConfig(home)
+	if got2.Auto == nil || *got2.Auto != false {
+		t.Error("Auto: should still be false after SetEnabled(true)")
+	}
+	if !IsEnabled(home) {
+		t.Error("after SetEnabled(true): IsEnabled = false, want true")
+	}
+}
