@@ -128,10 +128,33 @@ func Run(ctx context.Context, cfg Config) {
 // If the user has set skill injection to disabled mode via
 // `pilotctl skills disable` (persisted in ~/.pilot/config.json),
 // Tick returns an empty report without touching disk or the network.
+// Use ForceTick to run even when skill injection is disabled (e.g.
+// post-update reconcile in manual mode).
 func Tick(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
 	defer tickMu.Unlock()
 
+	return tick(ctx, cfg, false)
+}
+
+// ForceTick is like Tick but skips the IsEnabled() gate. It performs a
+// full scan + reconcile pass regardless of the persisted skill_inject
+// flag. Intended for one-shot use after a manual update (pilotctl update)
+// so skills reconcile even in manual mode where the periodic ticker is
+// not running.
+func ForceTick(ctx context.Context, cfg Config) (*Report, error) {
+	tickMu.Lock()
+	defer tickMu.Unlock()
+
+	return tick(ctx, cfg, true)
+}
+
+// tick is the shared implementation for Tick and ForceTick. When force is
+// true, the IsEnabled gate is bypassed.
+//
+// Callers (Tick, ForceTick) hold tickMu before calling tick; do NOT
+// acquire it here or we deadlock.
+func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 	home := cfg.Home
 	if home == "" {
 		h, err := os.UserHomeDir()
@@ -141,7 +164,7 @@ func Tick(ctx context.Context, cfg Config) (*Report, error) {
 		home = h
 	}
 
-	if GetMode(home) == ModeDisabled {
+	if !force && GetMode(home) == ModeDisabled {
 		return &Report{At: time.Now().UTC(), Disabled: true}, nil
 	}
 
