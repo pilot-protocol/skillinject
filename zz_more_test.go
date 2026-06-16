@@ -111,13 +111,146 @@ func TestIsEnabled_BadSubkeyDefaultsTrue(t *testing.T) {
 	if err := os.MkdirAll(cfgDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	// skill_inject value is not the expected EnabledFlag shape.
+	// skill_inject value is not the expected shape.
 	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"),
 		[]byte(`{"skill_inject":42}`), 0600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if !IsEnabled(home) {
 		t.Error("bad subkey type: want default true")
+	}
+}
+
+func TestGetMode_RoundtripsThroughDisk(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+
+	if err := SetMode(home, ModeManual); err != nil {
+		t.Fatalf("SetMode(manual): %v", err)
+	}
+	if g := GetMode(home); g != ModeManual {
+		t.Errorf("after SetMode(manual): GetMode = %q, want %q", g, ModeManual)
+	}
+
+	if err := SetMode(home, ModeAuto); err != nil {
+		t.Fatalf("SetMode(auto): %v", err)
+	}
+	if g := GetMode(home); g != ModeAuto {
+		t.Errorf("after SetMode(auto): GetMode = %q, want %q", g, ModeAuto)
+	}
+
+	if err := SetMode(home, ModeDisabled); err != nil {
+		t.Fatalf("SetMode(disabled): %v", err)
+	}
+	if g := GetMode(home); g != ModeDisabled {
+		t.Errorf("after SetMode(disabled): GetMode = %q, want %q", g, ModeDisabled)
+	}
+}
+
+func TestGetMode_EmptyDefaultsAuto(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	// No config file at all — default to ModeAuto (backward compat).
+	if g := GetMode(home); g != ModeAuto {
+		t.Errorf("missing config: GetMode = %q, want %q", g, ModeAuto)
+	}
+}
+
+func TestGetMode_LegacyEnabledCompat(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, ".pilot")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Write the legacy format: {"enabled": true} → ModeAuto
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"),
+		[]byte(`{"skill_inject": {"enabled": true}}`), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if g := GetMode(home); g != ModeAuto {
+		t.Errorf("legacy enabled=true: GetMode = %q, want %q", g, ModeAuto)
+	}
+
+	// Legacy format: {"enabled": false} → ModeDisabled
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"),
+		[]byte(`{"skill_inject": {"enabled": false}}`), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if g := GetMode(home); g != ModeDisabled {
+		t.Errorf("legacy enabled=false: GetMode = %q, want %q", g, ModeDisabled)
+	}
+}
+
+func TestSetMode_EmptyStringDefaultsToAuto(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	if err := SetMode(home, ""); err != nil {
+		t.Fatalf("SetMode(''): %v", err)
+	}
+	if g := GetMode(home); g != ModeAuto {
+		t.Errorf("SetMode(''): GetMode = %q, want %q", g, ModeAuto)
+	}
+}
+
+func TestSetMode_InvalidModeDefaultsToAuto(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	if err := SetMode(home, "invalid"); err != nil {
+		t.Fatalf("SetMode('invalid'): %v", err)
+	}
+	if g := GetMode(home); g != ModeAuto {
+		t.Errorf("SetMode('invalid'): GetMode = %q, want %q", g, ModeAuto)
+	}
+}
+
+func TestSetMode_PreservesOtherKeys(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, ".pilot")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Seed an existing config with an unrelated key.
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"),
+		[]byte(`{"other_key":"preserved"}`), 0600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := SetMode(home, ModeManual); err != nil {
+		t.Fatalf("SetMode: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(cfgDir, "config.json"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["other_key"]; !ok {
+		t.Error("other_key should be preserved across SetMode")
+	}
+	if _, ok := raw["skill_inject"]; !ok {
+		t.Error("skill_inject key missing after SetMode")
+	}
+}
+
+func TestGetMode_NewFormatPreferredOverLegacy(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	cfgDir := filepath.Join(home, ".pilot")
+	if err := os.MkdirAll(cfgDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Both legacy enabled + new mode present — new format wins.
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"),
+		[]byte(`{"skill_inject": {"mode": "manual", "enabled": false}}`), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if g := GetMode(home); g != ModeManual {
+		t.Errorf("both formats: GetMode = %q, want %q", g, ModeManual)
 	}
 }
 
