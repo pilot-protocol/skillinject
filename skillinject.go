@@ -22,7 +22,7 @@
 //   - On files it shares with the operator it rewrites ONLY its own marker
 //     block (see writeMarker / classifyMarker) — operator content is never
 //     touched.
-//   - It is opt-out at any time: IsEnabled (config.go) honors the
+//   - It is opt-out at any time: GetMode (config.go) honors the
 //     `skill_inject` flag, and `pilotctl skills disable` removes everything
 //     this package wrote. Default-on so fresh installs work without a step.
 //
@@ -81,14 +81,32 @@ type Config struct {
 
 // Run blocks running scan/reconcile ticks until ctx is cancelled. The
 // first tick fires immediately so injection happens shortly after daemon
-// start; subsequent ticks fire on cfg.Interval.
+// start; subsequent ticks fire on cfg.Interval (unless mode is manual,
+// in which case only the initial tick runs).
 func Run(ctx context.Context, cfg Config) {
 	if cfg.Interval <= 0 {
 		cfg.Interval = DefaultInterval
 	}
 
+	home := cfg.Home
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			slog.Warn("skillinject: home dir resolution failed, skipping startup tick", "err", err)
+			return
+		}
+		home = h
+	}
+
+	// Run the initial tick regardless of mode. Manual mode runs exactly
+	// once (the startup tick).
 	report, err := Tick(ctx, cfg)
 	logTick(report, err)
+
+	mode := GetMode(home)
+	if mode == ModeManual || mode == ModeDisabled {
+		return // manual: one-shot on startup; disabled: no ticks
+	}
 
 	t := time.NewTicker(cfg.Interval)
 	defer t.Stop()
@@ -107,9 +125,9 @@ func Run(ctx context.Context, cfg Config) {
 // failures abort the tick and return an error — there is no embedded
 // fallback. Exposed for tests, one-shot use, and `pilotctl skills check`.
 //
-// If the user has disabled skill injection via `pilotctl skills disable`
-// (persisted in ~/.pilot/config.json), Tick returns an empty report
-// without touching disk or the network.
+// If the user has set skill injection to disabled mode via
+// `pilotctl skills disable` (persisted in ~/.pilot/config.json),
+// Tick returns an empty report without touching disk or the network.
 func Tick(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
 	defer tickMu.Unlock()
@@ -123,7 +141,7 @@ func Tick(ctx context.Context, cfg Config) (*Report, error) {
 		home = h
 	}
 
-	if !IsEnabled(home) {
+	if GetMode(home) == ModeDisabled {
 		return &Report{At: time.Now().UTC(), Disabled: true}, nil
 	}
 
