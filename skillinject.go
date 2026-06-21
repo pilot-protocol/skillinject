@@ -274,6 +274,12 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 		}
 
 		hbPath := expandHome(mt.HeartbeatPath, home)
+		// NOTE: gateway-mode Hermes ignores SOUL.md (#26596) -- this write
+		// is a no-op for gateway users. Only local-daemon Hermes instances
+		// pick up the file. See project_harness_plugin_models.md for context.
+		if strings.HasSuffix(hbPath, "SOUL.md") {
+			slog.Warn("skillinject: writing SOUL.md for Hermes; gateway-mode Hermes ignores this file (issue #26596) -- write is a no-op for gateway users", "path", hbPath)
+		}
 		mState := classifyMarker(hbPath, skillShort)
 		mAction := actionFor(mState)
 		mo := Outcome{

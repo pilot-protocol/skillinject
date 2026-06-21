@@ -27,15 +27,19 @@ import (
 func classifyPluginAllowList(configPath, allowJsonPath, entriesJsonPath, pluginID string) State {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
-		// Don't conflate "config file missing" with "needs writing" —
-		// if the tool isn't installed at all, the caller's dirExists
-		// check on rootDir already skipped this whole tool. A missing
-		// config file at this point means the tool installed but
-		// hasn't run yet; treat as drifted so the daemon creates it.
 		if os.IsNotExist(err) {
+			// Config file missing: tool installed but hasn't written its
+			// config yet (first run). Treat as drifted so the daemon
+			// creates it. The caller's dirExists check on rootDir already
+			// skipped tools that aren't installed at all.
 			return StateDrifted
 		}
-		return StateDrifted
+		// Permission-denied or other I/O error: we cannot read the file
+		// and should not attempt to overwrite it. Return StateIdentical
+		// so the caller skips the merge and surfaces an error on the next
+		// tick (when the permission situation may have changed) rather
+		// than silently treating an unreadable config as needing a write.
+		return StateIdentical
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
