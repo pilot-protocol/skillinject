@@ -48,23 +48,26 @@ func configFilePath(home string) string {
 	return filepath.Join(home, ".pilot", configFileName)
 }
 
-// GetMode returns the current skill_inject mode. Falls back to
-// defaultMode (ModeManual) when the flag is absent or unreadable,
-// so fresh installs get the one-shot startup behaviour without a
-// periodic ticker until the user explicitly opts in to ModeAuto.
+// GetMode returns the current skill_inject mode. Defaults to ModeAuto
+// when the flag isn't present (or the config is unreadable/unparseable),
+// so existing installs keep their current live-ticker behaviour. New
+// installs are set to ModeManual explicitly on the first call to SetMode
+// (configured by the daemon's startup path) — we never flip an existing
+// install off the live ticker by silently changing the absent-config
+// default.
 func GetMode(home string) string {
 	f, err := os.Open(configFilePath(home))
 	if err != nil {
-		return defaultMode // no config file — use compiled-in default
+		return ModeAuto // existing behaviour — live ticker
 	}
 	defer f.Close()
 	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(f).Decode(&raw); err != nil {
-		return defaultMode
+		return ModeAuto
 	}
 	sub, ok := raw[configKey]
 	if !ok {
-		return defaultMode
+		return ModeAuto
 	}
 	// Try the new mode-based format first.
 	var modeFlag ModeFlag
@@ -83,7 +86,7 @@ func GetMode(home string) string {
 		}
 		return ModeDisabled
 	}
-	return defaultMode
+	return ModeAuto
 }
 
 // SetMode persists the skill_inject mode. Reads the existing config (if
