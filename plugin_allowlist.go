@@ -32,6 +32,12 @@ func classifyPluginAllowList(configPath, allowJsonPath, entriesJsonPath, pluginI
 		// check on rootDir already skipped this whole tool. A missing
 		// config file at this point means the tool installed but
 		// hasn't run yet; treat as drifted so the daemon creates it.
+		//
+		// For any other read error (permission denied, path is a
+		// directory) we also return StateDrifted so the caller proceeds
+		// to mergePluginAllowList, which re-reads the file and surfaces
+		// the error as an explicit ActionError. Returning StateIdentical
+		// here would silently swallow an unreadable config as a no-op.
 		if os.IsNotExist(err) {
 			return StateDrifted
 		}

@@ -49,12 +49,18 @@ import "github.com/pilot-protocol/skillinject"
 ## Usage
 
 ```go
-// Daemon registration:
+// Daemon registration (runs the ticker loop until ctx is cancelled):
 rt.Register(skillinject.NewService(skillinject.Config{ /* ... */ }))
 
-// Standalone (e.g. from a CLI):
-report := skillinject.Reconcile(skillinject.Config{ /* ... */ })
-_ = report
+// Blocking loop (first tick fires immediately; subsequent ticks on cfg.Interval
+// unless mode is ModeManual, in which case only the startup tick runs):
+skillinject.Run(ctx, skillinject.Config{ /* ... */ })
+
+// Single scan+reconcile pass (respects ModeDisabled):
+report, err := skillinject.Tick(ctx, skillinject.Config{ /* ... */ })
+
+// Single scan+reconcile pass, ignoring ModeDisabled (e.g. post-update):
+report, err = skillinject.ForceTick(ctx, skillinject.Config{ /* ... */ })
 ```
 
 ## Layout

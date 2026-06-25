@@ -49,9 +49,12 @@ func configFilePath(home string) string {
 }
 
 // GetMode returns the current skill_inject mode. Defaults to ModeAuto
-// when the flag isn't present, so existing installs keep their current
-// live-ticker behaviour. New installs will be set to ModeManual on
-// the first call to SetMode (configured by the daemon's startup path).
+// when the flag isn't present (or the config is unreadable/unparseable),
+// so existing installs keep their current live-ticker behaviour. New
+// installs are set to ModeManual explicitly on the first call to SetMode
+// (configured by the daemon's startup path) — we never flip an existing
+// install off the live ticker by silently changing the absent-config
+// default.
 func GetMode(home string) string {
 	f, err := os.Open(configFilePath(home))
 	if err != nil {

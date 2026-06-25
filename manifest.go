@@ -16,9 +16,13 @@ import (
 	"time"
 )
 
+// TODO: update to pilot-protocol/pilot-skills once that repo is transferred from TeoSlayer.
+
 // DefaultManifestURL is the canonical raw GitHub URL for the inject
 // manifest. Overridable via Config.ManifestURL (test hook).
 const DefaultManifestURL = "https://raw.githubusercontent.com/TeoSlayer/pilot-skills/main/inject-manifest.json"
+
+// TODO: update to pilot-protocol/pilot-skills once that repo is transferred from TeoSlayer.
 
 // DefaultRepoBaseURL is the prefix used to fetch any path the manifest
 // references (skills/<name>/SKILL.md, heartbeats/<tool>.md). Overridable
