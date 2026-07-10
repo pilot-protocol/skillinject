@@ -344,7 +344,7 @@ func TestReconcilePluginAllowList_IdenticalNoop(t *testing.T) {
 			EntriesJsonPath:   "plugins.entries",
 		},
 	}
-	out := reconcilePluginAllowList(p, home)
+	out := reconcilePluginAllowList(p, home, false)
 	if out.Action != ActionNoop {
 		t.Errorf("action = %v; want noop on identical state (got outcome %+v)", out.Action, out)
 	}
@@ -474,7 +474,7 @@ func TestReconcilePluginAllowList_MergeErrorSurfaced(t *testing.T) {
 			EntriesJsonPath:   "plugins.entries",
 		},
 	}
-	out := reconcilePluginAllowList(p, home)
+	out := reconcilePluginAllowList(p, home, false)
 	if out.Action != ActionError {
 		t.Errorf("action = %v; want error", out.Action)
 	}
@@ -513,7 +513,7 @@ func TestReconcilePluginFiles_PathTraversalRejected(t *testing.T) {
 
 	f := newFetcher(Config{RepoBaseURL: srv.URL + "/"})
 
-	out := reconcilePluginFiles(f, context.Background(), p, home)
+	out := reconcilePluginFiles(f, context.Background(), p, home, false)
 
 	// First entry (path traversal) should be an error.
 	if len(out) < 2 {
