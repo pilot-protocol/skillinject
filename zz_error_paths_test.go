@@ -219,7 +219,7 @@ func TestReconcilePluginAllowList_DiskErrorSurfacesAsOutcome(t *testing.T) {
 			EntriesJsonPath:   "plugins.entries",
 		},
 	}
-	out := reconcilePluginAllowList(p, home)
+	out := reconcilePluginAllowList(p, home, false)
 	if out.Action != ActionError {
 		t.Errorf("action = %v; want error", out.Action)
 	}
@@ -295,7 +295,7 @@ func TestReconcilePluginFiles_FetchErrorSurfaces(t *testing.T) {
 			{Name: "openclaw.plugin.json", Src: "plugin/openclaw.plugin.json"},
 		},
 	}
-	outs := reconcilePluginFiles(f, context.Background(), p, home)
+	outs := reconcilePluginFiles(f, context.Background(), p, home, false)
 	if len(outs) != 1 {
 		t.Fatalf("expected 1 outcome; got %d", len(outs))
 	}

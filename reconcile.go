@@ -32,6 +32,18 @@ func writeFile(path string, content []byte) error {
 // Returns the resulting State for reporting (Absent → created, Drifted →
 // rewritten, Identical → noop).
 func writeHelper(path string, content []byte, mode os.FileMode) (State, error) {
+	return writeHelperMaybe(path, content, mode, false)
+}
+
+// classifyHelper computes a helper's State without touching disk. Used by
+// the dry-run (Plan) path so `pilotctl skills status` can preview.
+func classifyHelper(path string, content []byte, mode os.FileMode) (State, error) {
+	st, err := writeHelperMaybe(path, content, mode, true)
+	return st, err
+}
+
+// writeHelperMaybe installs a helper (or, when dryRun, only classifies it).
+func writeHelperMaybe(path string, content []byte, mode os.FileMode, dryRun bool) (State, error) {
 	cur, err := os.ReadFile(path)
 	state := StateAbsent
 	switch {
@@ -47,6 +59,9 @@ func writeHelper(path string, content []byte, mode os.FileMode) (State, error) {
 		} else {
 			state = StateDrifted
 		}
+	}
+	if dryRun {
+		return state, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return state, err

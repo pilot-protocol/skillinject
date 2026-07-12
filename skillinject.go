@@ -134,7 +134,7 @@ func Tick(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
 	defer tickMu.Unlock()
 
-	return tick(ctx, cfg, false)
+	return tick(ctx, cfg, false, false)
 }
 
 // ForceTick is like Tick but skips the IsEnabled() gate. It performs a
@@ -146,7 +146,19 @@ func ForceTick(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
 	defer tickMu.Unlock()
 
-	return tick(ctx, cfg, true)
+	return tick(ctx, cfg, true, false)
+}
+
+// Plan is a read-only dry run: it performs the same scan + classification
+// as ForceTick (network fetch of the manifest + entrypoint) but writes
+// nothing to disk. The returned Report's Outcomes carry the State and the
+// Action the next real tick WOULD take, so `pilotctl skills status` can
+// preview changes without applying them.
+func Plan(ctx context.Context, cfg Config) (*Report, error) {
+	tickMu.Lock()
+	defer tickMu.Unlock()
+
+	return tick(ctx, cfg, true, true)
 }
 
 // tick is the shared implementation for Tick and ForceTick. When force is
@@ -154,7 +166,7 @@ func ForceTick(ctx context.Context, cfg Config) (*Report, error) {
 //
 // Callers (Tick, ForceTick) hold tickMu before calling tick; do NOT
 // acquire it here or we deadlock.
-func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
+func tick(ctx context.Context, cfg Config, force, dryRun bool) (*Report, error) {
 	home := cfg.Home
 	if home == "" {
 		h, err := os.UserHomeDir()
@@ -176,7 +188,7 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 	}
 	// Cache the manifest so `pilotctl skills disable` can find everything
 	// we wrote without depending on the network. Best-effort.
-	if manifestBytes, mErr := manifestJSON(manifest); mErr == nil {
+	if manifestBytes, mErr := manifestJSON(manifest); mErr == nil && !dryRun {
 		_ = writeCache(home, manifestCacheRel, manifestBytes)
 	}
 
@@ -186,7 +198,9 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch entrypoint %s: %w", entrypointRel, err)
 	}
-	_ = writeCache(home, entrypointRel, skillBody)
+	if !dryRun {
+		_ = writeCache(home, entrypointRel, skillBody)
+	}
 
 	skillHash := sha256Hex(skillBody)
 	skillShort := skillHash[:12]
@@ -208,7 +222,12 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 			continue
 		}
 		o.Hash = sha256Hex(body)
-		state, err := writeHelper(dst, body, ParseFileMode(h.Mode))
+		var state State
+		if dryRun {
+			state, err = classifyHelper(dst, body, ParseFileMode(h.Mode))
+		} else {
+			state, err = writeHelper(dst, body, ParseFileMode(h.Mode))
+		}
 		o.State = state
 		switch {
 		case err != nil:
@@ -239,7 +258,7 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 			Tool: mt.Name, Kind: KindSkill, Path: skillPath,
 			State: state, Action: action, Hash: skillHash,
 		}
-		if action != ActionNoop {
+		if action != ActionNoop && !dryRun {
 			if err := writeFile(skillPath, skillBody); err != nil {
 				o.Action = ActionError
 				o.Err = err.Error()
@@ -261,7 +280,9 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 			})
 			continue
 		}
-		_ = writeCache(home, mt.HeartbeatTemplate, tmplBody)
+		if !dryRun {
+			_ = writeCache(home, mt.HeartbeatTemplate, tmplBody)
+		}
 
 		ref, err := renderHeartbeat(tmplBody, heartbeatVars{EntrypointPath: skillPath})
 		if err != nil {
@@ -286,7 +307,7 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 			Tool: mt.Name, Kind: KindMarker, Path: hbPath,
 			State: mState, Action: mAction, Hash: skillShort,
 		}
-		if mAction != ActionNoop {
+		if mAction != ActionNoop && !dryRun {
 			if err := writeMarker(hbPath, ref, skillShort); err != nil {
 				mo.Action = ActionError
 				mo.Err = err.Error()
@@ -310,10 +331,10 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 		// surfaces in `pilotctl skills` exactly like the other rows.
 		if mt.Plugin != nil {
 			report.Outcomes = append(report.Outcomes,
-				reconcilePluginFiles(f, ctx, mt.Plugin, home)...)
+				reconcilePluginFiles(f, ctx, mt.Plugin, home, dryRun)...)
 			if mt.Plugin.AllowList != nil {
 				report.Outcomes = append(report.Outcomes,
-					reconcilePluginAllowList(mt.Plugin, home))
+					reconcilePluginAllowList(mt.Plugin, home, dryRun))
 			}
 		}
 	}
@@ -324,7 +345,7 @@ func tick(ctx context.Context, cfg Config, force bool) (*Report, error) {
 // reconcilePluginFiles fetches and writes each plugin source file. One
 // Outcome per file. Errors are isolated per file: a 404 on one source
 // doesn't block the rest of the plugin from being reconciled.
-func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, home string) []Outcome {
+func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, home string, dryRun bool) []Outcome {
 	installDir := expandHome(p.InstallPath, home)
 	out := make([]Outcome, 0, len(p.Files))
 	for _, pf := range p.Files {
@@ -355,7 +376,7 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 			Tool: p.ID, Kind: KindPluginFile, Path: dst,
 			State: state, Action: action, Hash: want,
 		}
-		if action != ActionNoop {
+		if action != ActionNoop && !dryRun {
 			if werr := writeFile(dst, body); werr != nil {
 				o.Action = ActionError
 				o.Err = werr.Error()
@@ -383,7 +404,7 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 // the public repo, and `pilotctl skills disable` reverses it. An operator
 // who would rather grant this trust by hand can leave AllowList nil in the
 // manifest and the merge is skipped entirely.
-func reconcilePluginAllowList(p *ManifestPlugin, home string) Outcome {
+func reconcilePluginAllowList(p *ManifestPlugin, home string, dryRun bool) Outcome {
 	al := p.AllowList
 	cfgPath := expandHome(al.ConfigPath, home)
 	o := Outcome{
@@ -392,7 +413,7 @@ func reconcilePluginAllowList(p *ManifestPlugin, home string) Outcome {
 	state := classifyPluginAllowList(cfgPath, al.AllowListJsonPath, al.EntriesJsonPath, p.ID)
 	o.State = state
 	o.Action = actionFor(state)
-	if o.Action == ActionNoop {
+	if o.Action == ActionNoop || dryRun {
 		return o
 	}
 	if err := mergePluginAllowList(cfgPath, al.AllowListJsonPath, al.EntriesJsonPath, p.ID); err != nil {
