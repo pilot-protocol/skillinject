@@ -128,25 +128,28 @@ func Run(ctx context.Context, cfg Config) {
 // If the user has set skill injection to disabled mode via
 // `pilotctl skills disable` (persisted in ~/.pilot/config.json),
 // Tick returns an empty report without touching disk or the network.
-// Use ForceTick to run even when skill injection is disabled (e.g.
-// post-update reconcile in manual mode).
 func Tick(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
 	defer tickMu.Unlock()
 
-	return tick(ctx, cfg, false, false)
+	return tick(ctx, cfg, false)
 }
 
-// ForceTick is like Tick but skips the IsEnabled() gate. It performs a
-// full scan + reconcile pass regardless of the persisted skill_inject
-// flag. Intended for one-shot use after a manual update (pilotctl update)
-// so skills reconcile even in manual mode where the periodic ticker is
-// not running.
+// ForceTick performs an immediate scan + reconcile pass, bypassing the
+// periodic ticker (which does not run in manual mode). It is the entry
+// point for `pilotctl skills check`, `pilotctl skills enable`, and the
+// post-update reconcile in `pilotctl update`.
+//
+// It does NOT override the disabled opt-out: once the user has run
+// `pilotctl skills disable`, ForceTick is a no-op until they re-enable.
+// (Enable persists mode=auto before calling in, so its reconcile still
+// runs.) Manual mode is not gated here, so a forced reconcile there
+// behaves exactly like Tick.
 func ForceTick(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
 	defer tickMu.Unlock()
 
-	return tick(ctx, cfg, true, false)
+	return tick(ctx, cfg, false)
 }
 
 // Plan is a read-only dry run: it performs the same scan + classification
@@ -158,15 +161,15 @@ func Plan(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
 	defer tickMu.Unlock()
 
-	return tick(ctx, cfg, true, true)
+	return tick(ctx, cfg, true)
 }
 
-// tick is the shared implementation for Tick and ForceTick. When force is
-// true, the IsEnabled gate is bypassed.
+// tick is the shared implementation for Tick, ForceTick, and Plan. dryRun
+// classifies without writing (Plan); otherwise it reconciles to disk.
 //
-// Callers (Tick, ForceTick) hold tickMu before calling tick; do NOT
-// acquire it here or we deadlock.
-func tick(ctx context.Context, cfg Config, force, dryRun bool) (*Report, error) {
+// Callers hold tickMu before calling tick; do NOT acquire it here or we
+// deadlock.
+func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	home := cfg.Home
 	if home == "" {
 		h, err := os.UserHomeDir()
@@ -176,7 +179,12 @@ func tick(ctx context.Context, cfg Config, force, dryRun bool) (*Report, error) 
 		home = h
 	}
 
-	if !force && GetMode(home) == ModeDisabled {
+	// Disabled is a hard opt-out: once the user runs `pilotctl skills disable`,
+	// nothing WRITES skills back — not the periodic ticker, and not a forced
+	// reconcile from `pilotctl skills check`, `pilotctl update`, or an installer
+	// re-run. Only the read-only dry run (Plan, behind `pilotctl skills` status)
+	// still previews what a re-enable would do.
+	if !dryRun && GetMode(home) == ModeDisabled {
 		return &Report{At: time.Now().UTC(), Disabled: true}, nil
 	}
 

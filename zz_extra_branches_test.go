@@ -192,29 +192,54 @@ func TestTick_DisabledReturnsEarly(t *testing.T) {
 	}
 }
 
-// skillTargetPath: "flat" SkillNaming yields a single-file path.
-func TestForceTick_SkipsDisabledGate(t *testing.T) {
+// ForceTick must HONOR the disabled opt-out — it does not resurrect skills a
+// user turned off via `pilotctl skills disable`. This is what protects the
+// opt-out from `pilotctl skills check`, `pilotctl update`, and installer
+// re-runs (all of which go through ForceTick).
+func TestForceTick_HonorsDisabledGate(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	if err := SetEnabled(home, false); err != nil {
 		t.Fatalf("SetEnabled(false): %v", err)
 	}
-	// Use a bogus URL — if ForceTick actually reaches the network, it
-	// would error. We give it a manifest URL that errors so we can tell
-	// ForceTick ran past the IsEnabled gate (returns network error)
-	// instead of the disabled short-circuit (returns Disabled report).
+	// Bogus URL: if ForceTick reached the network it would error. A disabled
+	// config must short-circuit BEFORE any fetch — so we expect no error and a
+	// Disabled report, proving nothing was fetched or written.
 	cfg := Config{
 		Home:        home,
 		ManifestURL: "http://127.0.0.1:1/nonexistent.json",
 		RepoBaseURL: "http://127.0.0.1:1/",
 	}
-	_, err := ForceTick(context.Background(), cfg)
-	if err == nil {
-		t.Error("ForceTick on disabled config with bogus URL: expected network error, got nil")
+	rep, err := ForceTick(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("ForceTick on disabled config: expected no error (short-circuit), got %v", err)
 	}
-	// The error should be a network error, not a disabled report.
-	// The disabled report would have succeeded with no error.
-	t.Logf("ForceTick error (expected network error): %v", err)
+	if rep == nil || !rep.Disabled {
+		t.Errorf("ForceTick on disabled config: expected Disabled report, got %+v", rep)
+	}
+	if rep != nil && (len(rep.Outcomes) != 0 || len(rep.Skipped) != 0) {
+		t.Errorf("ForceTick on disabled config wrote/planned work: %+v", rep)
+	}
+}
+
+// Plan (the read-only dry run behind `pilotctl skills` status) still previews
+// even when disabled — it must reach the network to classify, so a bogus URL
+// makes it error rather than short-circuit. This pins that the opt-out gate is
+// write-only, not a status blackout.
+func TestPlan_PreviewsEvenWhenDisabled(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	if err := SetEnabled(home, false); err != nil {
+		t.Fatalf("SetEnabled(false): %v", err)
+	}
+	cfg := Config{
+		Home:        home,
+		ManifestURL: "http://127.0.0.1:1/nonexistent.json",
+		RepoBaseURL: "http://127.0.0.1:1/",
+	}
+	if _, err := Plan(context.Background(), cfg); err == nil {
+		t.Error("Plan on disabled config with bogus URL: expected a network error (it must still fetch to preview), got nil")
+	}
 }
 
 func TestSkillTargetPath_FlatNaming(t *testing.T) {
