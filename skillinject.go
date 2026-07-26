@@ -75,8 +75,17 @@ type Config struct {
 	// ManifestPublicKey, when set, enables Ed25519 detached-signature
 	// verification on manifest + all fetched repo files. The daemon
 	// fetches <url>.sig alongside each resource and verifies before
-	// accepting. Nil (default) preserves the pre-verification behavior.
+	// accepting. When nil, the key is resolved from the environment
+	// (EnvManifestPublicKey), then the on-disk trust file
+	// (~/.pilot/skillinject.pub), then the built-in
+	// DefaultManifestPublicKeyHex. If none of those yield a key,
+	// verification is skipped, preserving the pre-verification behavior.
 	ManifestPublicKey ed25519.PublicKey
+	// RequireSignedManifest makes a verification key mandatory: when true
+	// and no key resolves from any source, every fetch fails instead of
+	// falling back to unverified transport trust. Also settable via
+	// EnvRequireSignedManifest. Default false.
+	RequireSignedManifest bool
 }
 
 // Run blocks running scan/reconcile ticks until ctx is cancelled. The
@@ -358,8 +367,8 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 	out := make([]Outcome, 0, len(p.Files))
 	for _, pf := range p.Files {
 		dst := filepath.Join(installDir, pf.Name)
-		// Reject path-traversal in pf.Name (e.g. "../../.ssh/authorized_keys")
-		if clean := filepath.Clean(dst); !strings.HasPrefix(clean, filepath.Clean(installDir)+string(os.PathSeparator)) && clean != filepath.Clean(installDir) {
+		// Only names that stay inside installDir are written.
+		if !pathWithin(installDir, dst) {
 			out = append(out, Outcome{
 				Tool: p.ID, Kind: KindPluginFile, Path: dst,
 				Action: ActionError,

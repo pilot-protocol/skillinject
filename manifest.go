@@ -5,6 +5,8 @@ package skillinject
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -123,13 +125,33 @@ type ManifestPluginAllowList struct {
 	EntriesJsonPath string `json:"entriesJsonPath"`
 }
 
+// EnvManifestPublicKey names the environment variable holding an
+// Ed25519 public key (hex or base64) used to verify fetched resources.
+const EnvManifestPublicKey = "PILOT_SKILLINJECT_PUBKEY"
+
+// EnvRequireSignedManifest names the environment variable that makes a
+// verification key mandatory. Recognised true values: "1", "true", "yes".
+const EnvRequireSignedManifest = "PILOT_SKILLINJECT_REQUIRE_SIG"
+
+// manifestPublicKeyRel is the path under ~/.pilot holding a trusted
+// Ed25519 public key in hex or base64 form, one key per file.
+const manifestPublicKeyRel = "skillinject.pub"
+
+// DefaultManifestPublicKeyHex is the built-in verification key, hex
+// encoded. Empty means no built-in key is compiled in, in which case the
+// Config field, the environment, and the on-disk trust file are the only
+// sources.
+const DefaultManifestPublicKeyHex = ""
+
 // fetcher is a small wrapper around http.Client that returns response
 // bodies. Pulled out so tests can inject a fake.
 type fetcher struct {
 	httpClient  *http.Client
 	manifestURL string
 	repoBase    string
-	publicKey   ed25519.PublicKey // nil = skip verification (backward compat)
+	publicKey   ed25519.PublicKey // nil = no key resolved
+	keyErr      error             // non-nil when a configured key failed to decode
+	requireSig  bool              // fail fetches when publicKey is nil
 }
 
 func newFetcher(cfg Config) *fetcher {
@@ -148,7 +170,102 @@ func newFetcher(cfg Config) *fetcher {
 	if !strings.HasSuffix(rb, "/") {
 		rb += "/"
 	}
-	return &fetcher{httpClient: c, manifestURL: mu, repoBase: rb, publicKey: cfg.ManifestPublicKey}
+	key, keyErr := resolveManifestPublicKey(cfg)
+	return &fetcher{
+		httpClient:  c,
+		manifestURL: mu,
+		repoBase:    rb,
+		publicKey:   key,
+		keyErr:      keyErr,
+		requireSig:  requireSignedManifest(cfg),
+	}
+}
+
+// requireSignedManifest reports whether a verification key is mandatory,
+// combining the Config field with EnvRequireSignedManifest.
+func requireSignedManifest(cfg Config) bool {
+	if cfg.RequireSignedManifest {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvRequireSignedManifest))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+// resolveManifestPublicKey returns the Ed25519 public key used to verify
+// fetched resources, checking the Config field, then the environment,
+// then the on-disk trust file, then the built-in default. A nil key with
+// a nil error means no source supplied one.
+func resolveManifestPublicKey(cfg Config) (ed25519.PublicKey, error) {
+	if len(cfg.ManifestPublicKey) > 0 {
+		if len(cfg.ManifestPublicKey) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("configured manifest public key is %d bytes, want %d",
+				len(cfg.ManifestPublicKey), ed25519.PublicKeySize)
+		}
+		return cfg.ManifestPublicKey, nil
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvManifestPublicKey)); v != "" {
+		k, err := decodeEd25519PublicKey(v)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", EnvManifestPublicKey, err)
+		}
+		return k, nil
+	}
+	if p := manifestPublicKeyPath(cfg.Home); p != "" {
+		if raw, err := os.ReadFile(p); err == nil {
+			if v := strings.TrimSpace(string(raw)); v != "" {
+				k, derr := decodeEd25519PublicKey(v)
+				if derr != nil {
+					return nil, fmt.Errorf("%s: %w", p, derr)
+				}
+				return k, nil
+			}
+		}
+	}
+	if DefaultManifestPublicKeyHex != "" {
+		k, err := decodeEd25519PublicKey(DefaultManifestPublicKeyHex)
+		if err != nil {
+			return nil, fmt.Errorf("built-in manifest public key: %w", err)
+		}
+		return k, nil
+	}
+	return nil, nil
+}
+
+// manifestPublicKeyPath returns the on-disk trust file location, or ""
+// when the home directory cannot be determined.
+func manifestPublicKeyPath(home string) string {
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		home = h
+	}
+	return filepath.Join(home, ".pilot", manifestPublicKeyRel)
+}
+
+// decodeEd25519PublicKey parses a public key encoded as hex, standard
+// base64, or raw (unpadded) base64.
+func decodeEd25519PublicKey(s string) (ed25519.PublicKey, error) {
+	s = strings.TrimSpace(s)
+	decoders := []func(string) ([]byte, error){
+		hex.DecodeString,
+		base64.StdEncoding.DecodeString,
+		base64.RawStdEncoding.DecodeString,
+	}
+	for _, dec := range decoders {
+		b, err := dec(s)
+		if err != nil {
+			continue
+		}
+		if len(b) == ed25519.PublicKeySize {
+			return ed25519.PublicKey(b), nil
+		}
+	}
+	return nil, fmt.Errorf("not a %d-byte hex or base64 ed25519 public key", ed25519.PublicKeySize)
 }
 
 func (f *fetcher) get(ctx context.Context, url string) ([]byte, error) {
@@ -201,9 +318,16 @@ func (f *fetcher) fetchRepoFile(ctx context.Context, relPath string) ([]byte, er
 
 // getOrVerify returns the body at url. When f.publicKey is set, it also
 // fetches <url>.sig and verifies the detached Ed25519 signature before
-// returning. Without a public key, behavior matches get() exactly
-// (backward compatible).
+// returning. Without a public key, behavior matches get() exactly unless
+// f.requireSig is set, in which case the fetch fails.
 func (f *fetcher) getOrVerify(ctx context.Context, url string) ([]byte, error) {
+	if f.keyErr != nil {
+		return nil, f.keyErr
+	}
+	if f.publicKey == nil && f.requireSig {
+		return nil, fmt.Errorf("signed manifest required but no public key resolved (set %s, %s, or Config.ManifestPublicKey)",
+			EnvManifestPublicKey, manifestPublicKeyPath(""))
+	}
 	body, err := f.get(ctx, url)
 	if err != nil {
 		return nil, err
@@ -219,6 +343,18 @@ func (f *fetcher) getOrVerify(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("ed25519 signature verification failed for %s", url)
 	}
 	return body, nil
+}
+
+// pathWithin reports whether path, after lexical cleaning, resolves to
+// dir itself or to a location beneath it. Both arguments are treated as
+// plain lexical paths; symlinks are not resolved.
+func pathWithin(dir, path string) bool {
+	cleanDir := filepath.Clean(dir)
+	cleanPath := filepath.Clean(path)
+	if cleanPath == cleanDir {
+		return true
+	}
+	return strings.HasPrefix(cleanPath, cleanDir+string(os.PathSeparator))
 }
 
 // expandHome resolves "~/" in a manifest path against the user's home dir.
