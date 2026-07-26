@@ -134,6 +134,20 @@ func Uninstall(ctx context.Context, cfg Config) (*RemovalReport, error) {
 			installDir := expandHome(mt.Plugin.InstallPath, home)
 			for _, pf := range mt.Plugin.Files {
 				dst := filepath.Join(installDir, pf.Name)
+				// Mirrors reconcilePluginFiles: only names that stay
+				// inside installDir are acted on. Anything that resolves
+				// outside was never written by the install path, so it is
+				// reported rather than removed.
+				if !pathWithin(installDir, dst) {
+					report.Removals = append(report.Removals, Removal{
+						Tool:   mt.Plugin.ID,
+						Kind:   KindPluginFile,
+						Path:   dst,
+						Action: RemovalError,
+						Err:    fmt.Sprintf("path traversal: %q escapes install dir", pf.Name),
+					})
+					continue
+				}
 				report.Removals = append(report.Removals, removeOwnedFile(mt.Plugin.ID, KindPluginFile, dst))
 			}
 			// Try to remove the plugin install dir if empty after.
