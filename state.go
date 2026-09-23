@@ -17,6 +17,10 @@ const (
 	StateIdentical State = "identical"
 	// File/marker exists but the content/hash differs from canonical.
 	StateDrifted State = "drifted"
+	// File/marker/plugin was installed by an earlier manifest that the
+	// current one no longer manages (see retired.go). Present on disk and
+	// due for removal.
+	StateRetired State = "retired"
 )
 
 // Action is what the reconcile loop chose to do in response to a State.
@@ -27,6 +31,9 @@ const (
 	ActionCreate  Action = "create"
 	ActionRewrite Action = "rewrite"
 	ActionError   Action = "error"
+	// ActionRemove: a retired surface is stripped (marker block) or
+	// deleted (owned file, allow-list entry). See retired.go.
+	ActionRemove Action = "remove"
 )
 
 // FileKind names which of a target's managed surfaces an Outcome is
@@ -61,6 +68,10 @@ type Outcome struct {
 	Action Action   `json:"action"`
 	Hash   string   `json:"hash,omitempty"`
 	Err    string   `json:"err,omitempty"`
+	// Note explains a row whose State/Action alone would mislead: a
+	// heartbeat file shared with another tool (reconciled once, for that
+	// tool), or a retired plugin neutralized instead of removed.
+	Note string `json:"note,omitempty"`
 }
 
 // Report is the result of one Tick.
@@ -68,8 +79,8 @@ type Report struct {
 	At       time.Time `json:"at"`
 	Outcomes []Outcome `json:"outcomes"`
 	Skipped  []string  `json:"skipped,omitempty"`
-	// Disabled is true if the tick was a no-op because the user has
-	// `pilotctl skills disable`'d injection.
+	// Disabled is true if the tick was a no-op because the user has run
+	// `pilotctl skills disable all`.
 	Disabled bool `json:"disabled,omitempty"`
 }
 
@@ -95,20 +106,32 @@ func classifySkill(path, wantHash string) State {
 }
 
 // classifyMarker inspects the heartbeat file at path and returns the State
-// of *our* marker block within it.
-func classifyMarker(path, wantShort string) State {
+// of *our* marker block within it. skillShort and rShort are the hash= and
+// r= values of the block the current tick would write (see reconcile.go).
+// A block from an older release has no r= and is Drifted, so it is
+// rewritten in place once.
+//
+// More than one marker block in the same file is always Drifted, whatever
+// their hashes: writeMarker then collapses them to a single block, so a
+// file that picked up a duplicate (an old release appending instead of
+// replacing, a hand-merged dotfile) heals on the next tick instead of
+// carrying two directives forever.
+func classifyMarker(path, skillShort, rShort string) State {
 	cur, err := os.ReadFile(path)
 	if err != nil {
 		return StateAbsent
 	}
-	m := markerRE.FindStringSubmatch(string(cur))
-	if m == nil {
+	blocks := findMarkers(string(cur))
+	switch {
+	case len(blocks) == 0:
 		return StateAbsent
-	}
-	if m[1] == wantShort {
+	case len(blocks) > 1:
+		return StateDrifted
+	case blocks[0].hash == skillShort && blocks[0].r == rShort:
 		return StateIdentical
+	default:
+		return StateDrifted
 	}
-	return StateDrifted
 }
 
 // classifyPluginFile inspects a plugin source file at path and returns

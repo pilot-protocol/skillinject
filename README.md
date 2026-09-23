@@ -33,8 +33,30 @@ to be earned with full transparency, so here is the whole story:
   wasn't signed by the expected key.
 - **It is non-destructive.** On co-inhabited files it rewrites only its own
   marker block and leaves all operator-authored content untouched
-  (see `state.go`/`reconcile.go`). Path-traversal in manifest filenames is
-  rejected.
+  (see `state.go`/`reconcile.go`). The block is inserted as literal text
+  (a `$5` in a heartbeat stays `$5`). Its begin comment carries
+  `hash=<SKILL.md>` (what older releases compare) and `r=<block>`, which
+  also covers the rendered block, so a heartbeat-only edit is shipped on
+  the next tick. A block whose end line was deleted by hand is left alone
+  rather than paired with a later block. A symlinked heartbeat file is
+  edited at its target, so the link survives, and it keeps its file mode.
+  Two tools whose heartbeat files are the same file (for example
+  `~/.config/opencode/AGENTS.md -> ~/.claude/CLAUDE.md`) share one block.
+  Path-traversal in manifest filenames is rejected.
+- **It cleans up after itself.** When the manifest stops managing a path
+  or plugin (for example OpenClaw's old `workspace/HEARTBEAT.md` block and
+  the retired `pilotprotocol-prompt-injector` plugin), every tick and
+  `pilotctl skills disable all` remove it: the marker block is stripped
+  from the user's file, the plugin id is dropped from `openclaw.json`, then
+  the plugin files are deleted. This includes ticks on a host that is
+  already opted out; those work offline from the built-in list and the
+  cached manifest. The list is built in (`retired.go`) and can be extended
+  by the manifest's `retired` key. Anything the current manifest still
+  manages is never treated as retired. If `openclaw.json` is not strict
+  JSON (OpenClaw also accepts comments and trailing commas), it is never
+  rewritten. The retired plugin's `index.mjs` is replaced with a no-op
+  instead, and the daemon log and report say so once. Every removal is
+  logged with its path.
 - **It is opt-out, anytime.** Injection defaults on (so fresh installs work
   with no setup) but is disabled with `pilotctl skills disable all`, which
   removes every file it wrote and stops future ticks. The flag persists in
@@ -59,8 +81,15 @@ skillinject.Run(ctx, skillinject.Config{ /* ... */ })
 // Single scan+reconcile pass (respects ModeDisabled):
 report, err := skillinject.Tick(ctx, skillinject.Config{ /* ... */ })
 
-// Single scan+reconcile pass, ignoring ModeDisabled (e.g. post-update):
+// Immediate pass outside the ticker (pilotctl skills check / update).
+// Also respects ModeDisabled:
 report, err = skillinject.ForceTick(ctx, skillinject.Config{ /* ... */ })
+
+// Read-only preview of what the next pass would do (pilotctl skills status):
+report, err = skillinject.Plan(ctx, skillinject.Config{ /* ... */ })
+
+// Remove everything ever written (pilotctl skills disable all):
+removed, err := skillinject.Uninstall(ctx, skillinject.Config{ /* ... */ })
 ```
 
 ## Layout
@@ -73,6 +102,7 @@ report, err = skillinject.ForceTick(ctx, skillinject.Config{ /* ... */ })
 | `reconcile.go` | Per-tick state machine: Absent → install, Drifted → rewrite, Identical → noop. |
 | `state.go` | File-state classifier (sha256 + heartbeat-marker parsing). |
 | `uninstall.go` | Strip-only on co-inhabited files; delete-safe in pilot-owned subdirs. |
+| `retired.go` | Surfaces older manifests installed and the current one dropped; removed on every tick and on uninstall. |
 | `plugin_allowlist.go` | OpenClaw allow-list JSON merge and `.pilot-bak` snapshot. |
 | `service.go` | `*Service` — `coreapi.Service` adapter. Build tag `!no_skillinject`. |
 | `service_disabled.go` | Stub when `-tags no_skillinject` is set. |

@@ -23,8 +23,10 @@
 //     block (see writeMarker / classifyMarker) — operator content is never
 //     touched.
 //   - It is opt-out at any time: GetMode (config.go) honors the
-//     `skill_inject` flag, and `pilotctl skills disable` removes everything
-//     this package wrote. Default-on so fresh installs work without a step.
+//     `skill_inject` flag, and `pilotctl skills disable all` removes
+//     everything this package wrote — including surfaces an earlier
+//     manifest installed and the current one has retired (retired.go).
+//     Default-on so fresh installs work without a step.
 //
 // The purpose is to make agents reach for Pilot before their host's default
 // tools — the value of a third-party overlay only lands if it is the default
@@ -108,13 +110,14 @@ func Run(ctx context.Context, cfg Config) {
 	}
 
 	// Run the initial tick regardless of mode. Manual mode runs exactly
-	// once (the startup tick).
+	// once (the startup tick). In disabled mode that tick only removes
+	// retired surfaces (see tick).
 	report, err := Tick(ctx, cfg)
 	logTick(report, err)
 
 	mode := GetMode(home)
 	if mode == ModeManual || mode == ModeDisabled {
-		return // manual: one-shot on startup; disabled: no ticks
+		return // manual: one-shot on startup; disabled: no further ticks
 	}
 
 	t := time.NewTicker(cfg.Interval)
@@ -135,8 +138,10 @@ func Run(ctx context.Context, cfg Config) {
 // fallback. Exposed for tests, one-shot use, and `pilotctl skills check`.
 //
 // If the user has set skill injection to disabled mode via
-// `pilotctl skills disable` (persisted in ~/.pilot/config.json),
-// Tick returns an empty report without touching disk or the network.
+// `pilotctl skills disable all` (persisted in ~/.pilot/config.json),
+// Tick installs nothing and makes no network request. It only removes
+// retired surfaces still on disk (see tick) and returns a report with
+// Disabled set.
 func Tick(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
 	defer tickMu.Unlock()
@@ -150,7 +155,7 @@ func Tick(ctx context.Context, cfg Config) (*Report, error) {
 // post-update reconcile in `pilotctl update`.
 //
 // It does NOT override the disabled opt-out: once the user has run
-// `pilotctl skills disable`, ForceTick is a no-op until they re-enable.
+// `pilotctl skills disable all`, ForceTick is a no-op until they re-enable.
 // (Enable persists mode=auto before calling in, so its reconcile still
 // runs.) Manual mode is not gated here, so a forced reconcile there
 // behaves exactly like Tick.
@@ -188,13 +193,25 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 		home = h
 	}
 
-	// Disabled is a hard opt-out: once the user runs `pilotctl skills disable`,
+	// Disabled is a hard opt-out: once the user runs `pilotctl skills disable all`,
 	// nothing WRITES skills back — not the periodic ticker, and not a forced
 	// reconcile from `pilotctl skills check`, `pilotctl update`, or an installer
 	// re-run. Only the read-only dry run (Plan, behind `pilotctl skills` status)
 	// still previews what a re-enable would do.
+	//
+	// Removing retired surfaces is still in scope: it is what the opt-out
+	// asked for. Hosts that ran `disable all` on a release without the
+	// retired list kept the prompt-injector plugin trusted and enabled, and
+	// they are exactly the hosts that sit in disabled mode after upgrading.
+	// The prune is offline (built-in list plus the cached manifest's
+	// "retired" key) and skips nothing, since nothing is managed while
+	// disabled.
 	if !dryRun && GetMode(home) == ModeDisabled {
-		return &Report{At: time.Now().UTC(), Disabled: true}, nil
+		return &Report{
+			At:       time.Now().UTC(),
+			Disabled: true,
+			Outcomes: pruneRetired(collectRetiredWhileDisabled(home), false),
+		}, nil
 	}
 
 	f := newFetcher(cfg)
@@ -203,7 +220,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Cache the manifest so `pilotctl skills disable` can find everything
+	// Cache the manifest so `pilotctl skills disable all` can find everything
 	// we wrote without depending on the network. Best-effort.
 	if manifestBytes, mErr := manifestJSON(manifest); mErr == nil && !dryRun {
 		_ = writeCache(home, manifestCacheRel, manifestBytes)
@@ -223,6 +240,16 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	skillShort := skillHash[:12]
 
 	report := &Report{At: time.Now().UTC()}
+
+	// Heartbeat files already reconciled this tick, by the file they
+	// resolve to. Two tools can share one file, typically through a
+	// symlink (~/.config/opencode/AGENTS.md -> ~/.claude/CLAUDE.md). Each
+	// tool renders a different block, so reconciling the file once per tool
+	// would rewrite it on every tick, each tool undoing the other. The
+	// first tool in manifest order owns the file and the rest report a
+	// noop row naming it.
+	type hbOwner struct{ tool, hash string }
+	hbOwners := map[string]hbOwner{}
 
 	// (0) install host-wide helpers (e.g. ~/.pilot/bin/pilot-ask). These
 	// are tool-agnostic and referenced from every tool's heartbeat
@@ -287,50 +314,22 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 		if mt.HeartbeatPath == "" || mt.HeartbeatTemplate == "" {
 			continue
 		}
-		tmplBody, err := f.fetchRepoFile(ctx, mt.HeartbeatTemplate)
-		if err != nil {
-			report.Outcomes = append(report.Outcomes, Outcome{
-				Tool: mt.Name, Kind: KindMarker,
-				Path:   expandHome(mt.HeartbeatPath, home),
-				Action: ActionError,
-				Err:    fmt.Sprintf("fetch %s: %v", mt.HeartbeatTemplate, err),
-			})
-			continue
-		}
-		if !dryRun {
-			_ = writeCache(home, mt.HeartbeatTemplate, tmplBody)
-		}
-
-		ref, err := renderHeartbeat(tmplBody, heartbeatVars{EntrypointPath: skillPath})
-		if err != nil {
-			report.Outcomes = append(report.Outcomes, Outcome{
-				Tool: mt.Name, Kind: KindMarker,
-				Path:   expandHome(mt.HeartbeatPath, home),
-				Action: ActionError, Err: err.Error(),
-			})
-			continue
-		}
-
 		hbPath := expandHome(mt.HeartbeatPath, home)
-		// NOTE: gateway-mode Hermes ignores SOUL.md (#26596) -- this write
-		// is a no-op for gateway users. Only local-daemon Hermes instances
-		// pick up the file. See project_harness_plugin_models.md for context.
-		if strings.HasSuffix(hbPath, "SOUL.md") {
-			slog.Warn("skillinject: writing SOUL.md for Hermes; gateway-mode Hermes ignores this file (issue #26596) -- write is a no-op for gateway users", "path", hbPath)
-		}
-		mState := classifyMarker(hbPath, skillShort)
-		mAction := actionFor(mState)
-		mo := Outcome{
-			Tool: mt.Name, Kind: KindMarker, Path: hbPath,
-			State: mState, Action: mAction, Hash: skillShort,
-		}
-		if mAction != ActionNoop && !dryRun {
-			if err := writeMarker(hbPath, ref, skillShort); err != nil {
-				mo.Action = ActionError
-				mo.Err = err.Error()
+		hbKey := canonicalPath(hbPath)
+		if owner, shared := hbOwners[hbKey]; shared {
+			report.Outcomes = append(report.Outcomes, Outcome{
+				Tool: mt.Name, Kind: KindMarker, Path: hbPath,
+				State: StateIdentical, Action: ActionNoop, Hash: owner.hash,
+				Note: fmt.Sprintf("same file as the %s heartbeat (%s), which keeps a single block written for %s", owner.tool, hbKey, owner.tool),
+			})
+		} else {
+			mo, rendered := reconcileMarker(ctx, f, mt, home, skillPath, skillHash, skillShort, hbPath, dryRun)
+			report.Outcomes = append(report.Outcomes, mo)
+			if !rendered {
+				continue
 			}
+			hbOwners[hbKey] = hbOwner{tool: mt.Name, hash: mo.Hash}
 		}
-		report.Outcomes = append(report.Outcomes, mo)
 
 		// (c) per-tool plugin files + (d) allow-list merge.
 		//
@@ -356,7 +355,71 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 		}
 	}
 
+	// (e) retired surfaces: marker blocks, plugins and helpers that an
+	// earlier manifest installed and the current one no longer manages.
+	// Runs after the active surfaces so a plugin allow-list merge above
+	// and the retired-id removal here touch openclaw.json in a fixed
+	// order. Only surfaces still present on disk produce an Outcome.
+	report.Outcomes = append(report.Outcomes,
+		pruneRetired(collectRetired(manifest, home), dryRun)...)
+
 	return report, nil
+}
+
+// reconcileMarker fetches and renders mt's heartbeat template, then
+// classifies and (unless dryRun) writes its marker block into hbPath. The
+// bool is false when the template could not be fetched or rendered; the
+// Outcome is then an error row and the caller skips the rest of the tool,
+// as it always has.
+func reconcileMarker(ctx context.Context, f *fetcher, mt ManifestTool, home, skillPath, skillHash, skillShort, hbPath string, dryRun bool) (Outcome, bool) {
+	tmplBody, err := f.fetchRepoFile(ctx, mt.HeartbeatTemplate)
+	if err != nil {
+		return Outcome{
+			Tool: mt.Name, Kind: KindMarker,
+			Path:   hbPath,
+			Action: ActionError,
+			Err:    fmt.Sprintf("fetch %s: %v", mt.HeartbeatTemplate, err),
+		}, false
+	}
+	if !dryRun {
+		_ = writeCache(home, mt.HeartbeatTemplate, tmplBody)
+	}
+
+	ref, err := renderHeartbeat(tmplBody, heartbeatVars{EntrypointPath: skillPath})
+	if err == nil {
+		err = validateMarkerRef(ref)
+	}
+	if err != nil {
+		return Outcome{
+			Tool: mt.Name, Kind: KindMarker,
+			Path:   hbPath,
+			Action: ActionError, Err: err.Error(),
+		}, false
+	}
+
+	// NOTE: gateway-mode Hermes ignores SOUL.md (#26596) -- this write
+	// is a no-op for gateway users. Only local-daemon Hermes instances
+	// pick up the file. See project_harness_plugin_models.md for context.
+	if strings.HasSuffix(hbPath, "SOUL.md") {
+		slog.Warn("skillinject: writing SOUL.md for Hermes; gateway-mode Hermes ignores this file (issue #26596) -- write is a no-op for gateway users", "path", hbPath)
+	}
+	// hash= stays the SKILL.md short hash (what older binaries
+	// compare); r= also covers the rendered block, so a
+	// heartbeat-template-only change is Drifted and ships.
+	rShort := markerHash(skillHash, ref)
+	mState := classifyMarker(hbPath, skillShort, rShort)
+	mAction := actionFor(mState)
+	mo := Outcome{
+		Tool: mt.Name, Kind: KindMarker, Path: hbPath,
+		State: mState, Action: mAction, Hash: rShort,
+	}
+	if mAction != ActionNoop && !dryRun {
+		if err := writeMarker(hbPath, ref, skillShort, rShort); err != nil {
+			mo.Action = ActionError
+			mo.Err = err.Error()
+		}
+	}
+	return mo, true
 }
 
 // reconcilePluginFiles fetches and writes each plugin source file. One
@@ -418,7 +481,8 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 // reason an installer enables the thing you just installed. It is bounded
 // and reversible: we only ever add OUR id (`p.ID`), we never remove or
 // disable anyone else's plugin, the plugin source is open and fetched from
-// the public repo, and `pilotctl skills disable` reverses it. An operator
+// the public repo, and `pilotctl skills disable all` reverses it (and a
+// plugin the manifest later retires is removed again, see retired.go). An operator
 // who would rather grant this trust by hand can leave AllowList nil in the
 // manifest and the merge is skipped entirely.
 func reconcilePluginAllowList(p *ManifestPlugin, home string, dryRun bool) Outcome {
@@ -453,21 +517,45 @@ func skillTargetPath(mt ManifestTool, entrypoint, home string) string {
 }
 
 func logTick(r *Report, err error) {
+	logTickTo(slog.Default(), r, err)
+}
+
+// logTickTo logs one tick's summary and then one line per retired-surface
+// row. Those rows delete files and edit a tool's config (openclaw.json)
+// without anyone asking at that moment, so each one is logged with its
+// path to keep the mechanism auditable.
+func logTickTo(l *slog.Logger, r *Report, err error) {
 	if err != nil {
-		slog.Warn("skillinject tick failed", "err", err)
+		l.Warn("skillinject tick failed", "err", err)
 		return
 	}
 	if r == nil {
 		return
 	}
 	c := r.Counts()
-	slog.Info("skillinject tick",
+	l.Info("skillinject tick",
+		"disabled", r.Disabled,
 		"tools_skipped", len(r.Skipped),
 		"noops", c[ActionNoop],
 		"creates", c[ActionCreate],
 		"rewrites", c[ActionRewrite],
+		"removes", c[ActionRemove],
 		"errors", c[ActionError],
 	)
+	for _, o := range r.Outcomes {
+		if o.State != StateRetired {
+			continue
+		}
+		attrs := []any{"tool", o.Tool, "kind", o.Kind, "path", o.Path, "action", o.Action}
+		if o.Note != "" {
+			attrs = append(attrs, "note", o.Note)
+		}
+		if o.Err != "" {
+			l.Warn("skillinject retired surface", append(attrs, "err", o.Err)...)
+			continue
+		}
+		l.Info("skillinject retired surface", attrs...)
+	}
 }
 
 func sha256Hex(b []byte) string {

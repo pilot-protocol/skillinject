@@ -76,7 +76,7 @@ func TestWriteMarker_MkdirFails(t *testing.T) {
 	}
 	// Path is under a regular file → ReadFile returns ENOTDIR (a
 	// non-IsNotExist error), so writeMarker returns immediately.
-	err := writeMarker(filepath.Join(parentAsFile, "AGENT.md"), "ref", "abc123")
+	err := writeMarker(filepath.Join(parentAsFile, "AGENT.md"), "ref", "abc123", "def456")
 	if err == nil {
 		t.Fatal("expected error reading or making path under a file")
 	}
