@@ -238,40 +238,181 @@ func TestPlan_ReportsRetiredWithoutTouchingDisk(t *testing.T) {
 	mustExist(t, filepath.Join(h.pluginDir, "index.mjs"))
 }
 
-// If openclaw.json cannot be parsed, the retired plugin's files stay: the
-// tool would otherwise still trust an id with nothing on disk. The tick
-// reports the problem instead.
-func TestTick_RetiredPluginKeptWhenConfigUnparseable(t *testing.T) {
-	t.Parallel()
-	h := seedStaleOpenClaw(t)
-	mustWriteFile(t, h.config, "{ this is not json", 0o600)
-	r := newFakeRepo(t)
-	r.withTools(currentOpenClaw())
+// openClawJSON5Config is openclaw.json as OpenClaw also accepts it: JSON5
+// with comments and trailing commas. Strict encoding/json cannot parse it,
+// and it is never rewritten.
+const openClawJSON5Config = `{
+  // my telegram bot
+  "channels": {"telegram": {"botToken": "123:abc"}},
+  "plugins": {
+    "allow": ["pilotprotocol-prompt-injector", "user-plugin",],
+    "entries": {
+      "pilotprotocol-prompt-injector": {"enabled": true},
+    },
+  },
+}
+`
 
-	rep, err := skillinject.Tick(context.Background(), r.cfg(h.home))
+// If openclaw.json cannot be parsed (JSON5, or just broken), the id cannot
+// be taken out of it, and the files cannot be deleted without leaving
+// OpenClaw trusting a plugin with nothing on disk. The tick replaces the
+// plugin's index.mjs with a no-op instead and reports that once. Later
+// ticks are quiet: no error row on every tick. When the config parses
+// again, the plugin is removed as usual.
+func TestTick_RetiredPluginNeutralizedWhenConfigUnparseable(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"json5":  openClawJSON5Config,
+		"broken": "{ this is not json",
+	} {
+		body := body
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := seedStaleOpenClaw(t)
+			mustWriteFile(t, h.config, body, 0o600)
+			index := filepath.Join(h.pluginDir, "index.mjs")
+			r := newFakeRepo(t)
+			r.withTools(currentOpenClaw())
+			cfg := r.cfg(h.home)
+
+			// The dry run previews the rewrite and changes nothing.
+			rep, err := skillinject.Plan(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("Plan: %v", err)
+			}
+			if o := outcomeFor(rep, index); o == nil || o.State != skillinject.StateRetired || o.Action != skillinject.ActionRewrite {
+				t.Fatalf("Plan: want retired/rewrite for index.mjs, got %+v", o)
+			}
+			if mustRead(t, index) != "// retired\n" {
+				t.Fatal("Plan rewrote index.mjs")
+			}
+
+			rep, err = skillinject.Tick(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("Tick: %v", err)
+			}
+			if c := rep.Counts(); c[skillinject.ActionError] != 0 {
+				t.Fatalf("want no error rows, got %+v", rep.Outcomes)
+			}
+			o := outcomeFor(rep, index)
+			if o == nil || o.State != skillinject.StateRetired || o.Action != skillinject.ActionRewrite {
+				t.Fatalf("want retired/rewrite for index.mjs, got %+v", o)
+			}
+			if !strings.Contains(o.Note, "no-op") || !strings.Contains(o.Note, "refusing to edit") {
+				t.Errorf("note does not explain the neutralization: %q", o.Note)
+			}
+			stub := mustRead(t, index)
+			if !strings.Contains(stub, "register() {}") || strings.Contains(stub, "before_prompt_build") {
+				t.Fatalf("index.mjs is not the no-op stub:\n%s", stub)
+			}
+			if !strings.Contains(stub, `id: "pilotprotocol-prompt-injector"`) {
+				t.Fatalf("stub lost the plugin id OpenClaw trusts:\n%s", stub)
+			}
+			// openclaw.plugin.json stays so the trusted id still resolves.
+			mustExist(t, filepath.Join(h.pluginDir, "openclaw.plugin.json"))
+			if mustRead(t, h.config) != body {
+				t.Fatal("unparseable config was modified")
+			}
+			// The marker strip does not depend on the config and still happens.
+			if strings.Contains(mustRead(t, h.heartbeat), "pilot:begin") {
+				t.Error("stale HEARTBEAT.md block not stripped")
+			}
+
+			// Reported once: the next tick has nothing to say about the plugin.
+			rep, err = skillinject.Tick(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("Tick #2: %v", err)
+			}
+			if rr := retiredOutcomes(rep); len(rr) != 0 {
+				t.Fatalf("second tick still reports the retired plugin: %+v", rr)
+			}
+			if mustRead(t, index) != stub {
+				t.Fatal("stub rewritten on the second tick")
+			}
+
+			// The user makes the config strict JSON: the id is removed and
+			// the plugin, stub included, is deleted.
+			mustWriteFile(t, h.config, openClawConfig, 0o600)
+			if _, err := skillinject.Tick(context.Background(), cfg); err != nil {
+				t.Fatalf("Tick #3: %v", err)
+			}
+			assertRetiredCleanedUp(t, h)
+		})
+	}
+}
+
+// A retired plugin without a known stub (manifest-declared) still reports
+// an error and keeps its files when the config cannot be parsed.
+func TestTick_RetiredPluginWithoutStubKeptWhenConfigUnparseable(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	mustMkdirAll(t, filepath.Join(home, ".claude"))
+	dir := filepath.Join(home, ".tool", "ext", "pilot-old")
+	mustMkdirAll(t, dir)
+	mustWriteFile(t, filepath.Join(dir, "index.mjs"), "// old\n", 0o644)
+	cfgPath := filepath.Join(home, ".tool", "cfg.json")
+	mustWriteFile(t, cfgPath, "{ // json5\n \"a\": [\"pilot-old\",],}\n", 0o644)
+
+	r := newFakeRepo(t)
+	r.withTools(claudeOnly())
+	r.manifest.Retired = &skillinject.ManifestRetired{Plugins: []skillinject.ManifestPlugin{{
+		ID: "pilot-old", InstallPath: "~/.tool/ext/pilot-old",
+		Files:     []skillinject.ManifestPluginFile{{Name: "index.mjs"}},
+		AllowList: &skillinject.ManifestPluginAllowList{ConfigPath: "~/.tool/cfg.json", AllowListJsonPath: "a", EntriesJsonPath: "e"},
+	}}}
+	rep, err := skillinject.Tick(context.Background(), r.cfg(home))
 	if err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
-	var cfgOutcome *skillinject.Outcome
-	for _, o := range rep.Outcomes {
-		if o.Path == h.config {
-			o := o
-			cfgOutcome = &o
+	o := outcomeFor(rep, cfgPath)
+	if o == nil || o.Action != skillinject.ActionError || !strings.Contains(o.Err, "leaving the retired plugin's files in place") {
+		t.Fatalf("want an error outcome for the config, got %+v", o)
+	}
+	if mustRead(t, filepath.Join(dir, "index.mjs")) != "// old\n" {
+		t.Fatal("plugin without a stub was modified")
+	}
+}
+
+// `pilotctl skills disable all` on a host whose openclaw.json is JSON5
+// neutralizes the retired plugin too, and says so.
+func TestUninstall_NeutralizesRetiredPluginWithJSON5Config(t *testing.T) {
+	t.Parallel()
+	h := seedStaleOpenClaw(t)
+	mustWriteFile(t, h.config, openClawJSON5Config, 0o600)
+	r := newFakeRepo(t)
+	r.withTools(currentOpenClaw())
+	rep, err := skillinject.Uninstall(context.Background(), r.cfg(h.home))
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	index := filepath.Join(h.pluginDir, "index.mjs")
+	var got *skillinject.Removal
+	for i := range rep.Removals {
+		if rep.Removals[i].Path == index {
+			got = &rep.Removals[i]
 		}
 	}
-	if cfgOutcome == nil || cfgOutcome.Action != skillinject.ActionError ||
-		!strings.Contains(cfgOutcome.Err, "leaving the retired plugin's files in place") {
-		t.Fatalf("want an error outcome for openclaw.json, got %+v", cfgOutcome)
+	if got == nil || got.Action != skillinject.RemovalNeutralized || got.Note == "" {
+		t.Fatalf("want a neutralized removal with a note for index.mjs, got %+v", got)
 	}
-	mustExist(t, filepath.Join(h.pluginDir, "index.mjs"))
-	mustExist(t, filepath.Join(h.pluginDir, "openclaw.plugin.json"))
-	if mustRead(t, h.config) != "{ this is not json" {
-		t.Fatal("unparseable config was modified")
+	if c := rep.Counts(); c[skillinject.RemovalError] != 0 {
+		t.Errorf("errors during uninstall: %+v", rep.Removals)
 	}
-	// The marker strip does not depend on the config and still happens.
-	if strings.Contains(mustRead(t, h.heartbeat), "pilot:begin") {
-		t.Error("stale HEARTBEAT.md block not stripped")
+	if !strings.Contains(mustRead(t, index), "register() {}") {
+		t.Fatal("index.mjs not neutralized")
 	}
+	if mustRead(t, h.config) != openClawJSON5Config {
+		t.Fatal("JSON5 config was modified")
+	}
+}
+
+func outcomeFor(rep *skillinject.Report, path string) *skillinject.Outcome {
+	for i := range rep.Outcomes {
+		if rep.Outcomes[i].Path == path {
+			return &rep.Outcomes[i]
+		}
+	}
+	return nil
 }
 
 // A path the current manifest still manages is never treated as retired,

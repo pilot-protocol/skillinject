@@ -36,6 +36,11 @@ const (
 	// and we restored from it byte-for-byte (preferred over a manual
 	// inverse-merge when available).
 	RemovalRestored RemovalKind = "restored"
+	// RemovalNeutralized: a retired plugin could not be removed because the
+	// tool's config could not be edited safely (see retired.go), so its
+	// entry file was replaced with a no-op. The plugin stays listed but
+	// does nothing.
+	RemovalNeutralized RemovalKind = "neutralized"
 	// RemovalNoop: nothing on disk to remove for this path.
 	RemovalNoop RemovalKind = "noop"
 	// RemovalError: a removal attempt failed; see Err.
@@ -50,6 +55,8 @@ type Removal struct {
 	Path   string      `json:"path"`
 	Action RemovalKind `json:"action"`
 	Err    string      `json:"err,omitempty"`
+	// Note explains a RemovalNeutralized row.
+	Note string `json:"note,omitempty"`
 }
 
 // RemovalReport is what Uninstall returns to its caller.
@@ -224,7 +231,9 @@ func removeOwnedFile(tool string, kind FileKind, path string) Removal {
 // stripMarkerFile removes our marker block from a user-owned heartbeat
 // file (CLAUDE.md, AGENTS.md, AGENT.md, SOUL.md). SAFETY: never deletes
 // the file, even if our marker was the only content. The user can `rm`
-// it themselves if they want it gone.
+// it themselves if they want it gone. Only complete blocks are removed
+// (findMarkers), a symlinked file is edited at its target and keeps the
+// link, and the file keeps its mode.
 func stripMarkerFile(tool, path string) Removal {
 	r := Removal{Tool: tool, Kind: KindMarker, Path: path}
 	cur, err := os.ReadFile(path)
@@ -237,15 +246,16 @@ func stripMarkerFile(tool, path string) Removal {
 		r.Err = err.Error()
 		return r
 	}
-	if !markerRE.Match(cur) {
+	blocks := findMarkers(string(cur))
+	if len(blocks) == 0 {
 		// File exists but no marker — user already removed it, or this
 		// file pre-existed and we never inserted (e.g. tool wasn't
 		// detected on this host at install time). Leave untouched.
 		r.Action = RemovalNoop
 		return r
 	}
-	stripped := markerRE.ReplaceAllLiteralString(string(cur), "")
-	if err := writeFile(path, []byte(stripped)); err != nil {
+	stripped := spliceMarker(string(cur), blocks, "")
+	if err := writeUserFile(path, []byte(stripped)); err != nil {
 		r.Action = RemovalError
 		r.Err = err.Error()
 		return r

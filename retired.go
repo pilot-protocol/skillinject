@@ -14,8 +14,9 @@ package skillinject
 // own file text, to every turn. `pilotctl skills disable all` left both
 // behind.
 //
-// The retired list closes that gap. Every tick removes what is on it and
-// Uninstall removes it too. It merges two sources:
+// The retired list closes that gap. Every tick removes what is on it,
+// including ticks on a host in disabled mode (see collectRetiredWhileDisabled),
+// and Uninstall removes it too. It merges two sources:
 //
 //   - builtinRetired: surfaces released manifests are known to have
 //     installed and have since dropped.
@@ -26,14 +27,18 @@ package skillinject
 //
 //   - Anything the current manifest still manages is skipped, so a path
 //     that is adopted again later is never written and then stripped in
-//     alternate ticks.
+//     alternate ticks. Paths are compared after resolving symlinks, so a
+//     retired file that links to an active one is skipped too.
 //   - Marker files are user-owned: only our marker block is stripped and
 //     the file is kept.
 //   - Plugin files are deleted only from a directory whose name is the
 //     plugin id, only for the listed file names, and only after the id has
-//     been taken out of the tool's allow-list. If the tool's config cannot
-//     be parsed, the plugin is left in place and the tick reports an error
-//     rather than leaving the tool trusting a plugin with no files.
+//     been taken out of the tool's allow-list. A config that cannot be
+//     parsed is never rewritten. OpenClaw accepts JSON5, so comments and
+//     trailing commas are normal there. The files are then kept, so the
+//     tool never trusts a plugin with no files. A plugin with a known
+//     no-op stub (retiredPluginStubs) has its entry file replaced by the
+//     stub, reported once. Any other plugin gets an error row.
 //   - Helpers are deleted only from under ~/.pilot.
 //   - Only surfaces still present on disk produce a report row, so a host
 //     that never had them sees nothing.
@@ -128,7 +133,41 @@ type retiredPlugin struct {
 	files      []string                 // absolute, each inside installDir
 	allowList  *ManifestPluginAllowList // nil = no config entry to undo
 	cfgPath    string                   // resolved allowList.ConfigPath
+	stubs      map[string]string        // file base name -> no-op content
 }
+
+// retiredPluginStubs maps a built-in retired plugin id to no-op
+// replacements for its files. They are used only when the id cannot be
+// taken out of the tool's config (see neutralizeRetiredPlugin).
+var retiredPluginStubs = map[string]map[string]string{
+	"pilotprotocol-prompt-injector": {"index.mjs": promptInjectorStub},
+}
+
+// promptInjectorStub replaces the retired prompt injector's index.mjs. It
+// keeps the plugin's id and export shape, so OpenClaw still loads the id
+// it trusts, and its register() adds no hook.
+const promptInjectorStub = `// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// Retired Pilot Protocol prompt injector, neutralized by pilot-daemon.
+//
+// This plugin is retired. pilot-daemon removes a retired plugin by taking
+// its id out of plugins.allow and plugins.entries in
+// ~/.openclaw/openclaw.json and then deleting this directory. That file
+// could not be read as strict JSON (for example it has comments or
+// trailing commas), and pilot-daemon does not rewrite a file it cannot
+// parse. It replaced the plugin code with this no-op instead.
+//
+// To finish the removal, delete "pilotprotocol-prompt-injector" from
+// plugins.allow and plugins.entries. The next pilot-daemon tick then
+// deletes this directory.
+
+export default {
+  id: "pilotprotocol-prompt-injector",
+  name: "Pilot Protocol Prompt Injector (retired)",
+  description: "Retired. Registers nothing.",
+  register() {},
+};
+`
 
 type retiredHelper struct{ name, path string }
 
@@ -144,18 +183,22 @@ func collectRetired(m *Manifest, home string) retiredItems {
 		return abs, filepath.IsAbs(abs)
 	}
 
+	// Markers and plugin dirs are keyed by the path they resolve to: a
+	// retired heartbeat that is a symlink to an active one (or the other
+	// way round) is the same file, and stripping it would undo the active
+	// write on every tick.
 	activeMarkers := map[string]bool{}
 	activeHelpers := map[string]bool{}
 	activePluginIDs := map[string]bool{}
 	activePluginDirs := map[string]bool{}
 	for _, mt := range m.Tools {
 		if p, ok := resolve(mt.HeartbeatPath); ok {
-			activeMarkers[p] = true
+			activeMarkers[canonicalPath(p)] = true
 		}
 		if mt.Plugin != nil {
 			activePluginIDs[mt.Plugin.ID] = true
 			if p, ok := resolve(mt.Plugin.InstallPath); ok {
-				activePluginDirs[p] = true
+				activePluginDirs[canonicalPath(p)] = true
 			}
 		}
 	}
@@ -176,10 +219,14 @@ func collectRetired(m *Manifest, home string) retiredItems {
 	for _, src := range sources {
 		for _, rm := range src.Markers {
 			p, ok := resolve(rm.Path)
-			if !ok || activeMarkers[p] || seen["marker:"+p] {
+			if !ok {
 				continue
 			}
-			seen["marker:"+p] = true
+			key := canonicalPath(p)
+			if activeMarkers[key] || seen["marker:"+key] {
+				continue
+			}
+			seen["marker:"+key] = true
 			out.markers = append(out.markers, retiredMarker{tool: rm.Tool, path: p})
 		}
 		for _, rp := range src.Plugins {
@@ -187,11 +234,11 @@ func collectRetired(m *Manifest, home string) retiredItems {
 			if !ok || rp.ID == "" || filepath.Base(dir) != rp.ID {
 				continue
 			}
-			if activePluginIDs[rp.ID] || activePluginDirs[dir] || seen["plugin:"+rp.ID] {
+			if activePluginIDs[rp.ID] || activePluginDirs[canonicalPath(dir)] || seen["plugin:"+rp.ID] {
 				continue
 			}
 			seen["plugin:"+rp.ID] = true
-			x := retiredPlugin{id: rp.ID, installDir: dir}
+			x := retiredPlugin{id: rp.ID, installDir: dir, stubs: retiredPluginStubs[rp.ID]}
 			for _, f := range rp.Files {
 				dst := filepath.Join(dir, f.Name)
 				if f.Name == "" || dst == dir || !pathWithin(dir, dst) {
@@ -222,15 +269,32 @@ func collectRetired(m *Manifest, home string) retiredItems {
 	return out
 }
 
+// collectRetiredWhileDisabled is the retired list for a host in disabled
+// mode: the built-in list plus the "retired" key of the manifest the last
+// tick cached. Nothing is managed while disabled, so no active surface is
+// skipped. It never touches the network; with no readable cache it is the
+// built-in list alone.
+func collectRetiredWhileDisabled(home string) retiredItems {
+	m := &Manifest{}
+	if raw, err := os.ReadFile(filepath.Join(cacheDir(home), manifestCacheRel)); err == nil {
+		var cached Manifest
+		if json.Unmarshal(raw, &cached) == nil {
+			m.Retired = cached.Retired
+		}
+	}
+	return collectRetired(m, home)
+}
+
 // retiredResult is one retired surface that was removed, or in a dry run
-// would be. action is RemovalStripped, RemovalDeleted, RemovalMerged or
-// RemovalError.
+// would be. action is RemovalStripped, RemovalDeleted, RemovalMerged,
+// RemovalNeutralized or RemovalError.
 type retiredResult struct {
 	tool   string
 	kind   FileKind
 	path   string
 	action RemovalKind
 	err    string
+	note   string
 }
 
 // applyRetired removes every retired surface still present on disk. With
@@ -290,6 +354,9 @@ func applyRetiredPlugin(rp retiredPlugin, dryRun bool) []retiredResult {
 				// is not ours to report on every tick.
 				return nil
 			}
+			if len(rp.stubs) > 0 {
+				return neutralizeRetiredPlugin(rp, present, err, dryRun)
+			}
 			return []retiredResult{{
 				tool: rp.id, kind: KindPluginAllowList, path: rp.cfgPath, action: RemovalError,
 				err: fmt.Sprintf("%v; leaving the retired plugin's files in place", err),
@@ -321,16 +388,54 @@ func applyRetiredPlugin(rp retiredPlugin, dryRun bool) []retiredResult {
 	return out
 }
 
+// neutralizeRetiredPlugin handles a retired plugin whose id cannot be taken
+// out of the tool's config, because the config cannot be read or does not
+// parse as strict JSON. Deleting the files would leave the tool trusting
+// an id with nothing on disk, and rewriting a JSON5 file would drop the
+// user's comments. Instead each present file that has a stub is overwritten
+// with it, so the id still resolves and the plugin does nothing. A file
+// that already holds its stub is skipped: the change is reported once,
+// not as an error on every tick. Once the config parses, the next tick
+// removes the id and deletes the files as usual.
+func neutralizeRetiredPlugin(rp retiredPlugin, present []string, cfgErr error, dryRun bool) []retiredResult {
+	var out []retiredResult
+	for _, f := range present {
+		stub, ok := rp.stubs[filepath.Base(f)]
+		if !ok {
+			continue
+		}
+		if cur, err := os.ReadFile(f); err == nil && string(cur) == stub {
+			continue
+		}
+		r := retiredResult{
+			tool: rp.id, kind: KindPluginFile, path: f, action: RemovalNeutralized,
+			note: fmt.Sprintf("%v; %s is replaced with a no-op, so the retired plugin stays listed but does nothing. Remove %q from %s and %s to finish; the next tick then deletes the plugin",
+				cfgErr, filepath.Base(f), rp.id, rp.allowList.AllowListJsonPath, rp.allowList.EntriesJsonPath),
+		}
+		if !dryRun {
+			if err := writeFileAtomic(f, []byte(stub), 0o644); err != nil {
+				r.action, r.err, r.note = RemovalError, err.Error(), ""
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // pruneRetired is the reconcile side of applyRetired: one Outcome per
-// retired surface present on disk, State retired, Action remove (or error).
+// retired surface present on disk, State retired, Action remove (rewrite
+// for a neutralized plugin file, error on failure).
 func pruneRetired(items retiredItems, dryRun bool) []Outcome {
 	res := applyRetired(items, dryRun)
 	out := make([]Outcome, 0, len(res))
 	for _, r := range res {
-		o := Outcome{Tool: r.tool, Kind: r.kind, Path: r.path, State: StateRetired, Action: ActionRemove}
-		if r.action == RemovalError {
+		o := Outcome{Tool: r.tool, Kind: r.kind, Path: r.path, State: StateRetired, Action: ActionRemove, Note: r.note}
+		switch r.action {
+		case RemovalError:
 			o.Action = ActionError
 			o.Err = r.err
+		case RemovalNeutralized:
+			o.Action = ActionRewrite
 		}
 		out = append(out, o)
 	}
@@ -342,15 +447,16 @@ func removeRetired(items retiredItems) []Removal {
 	res := applyRetired(items, false)
 	out := make([]Removal, 0, len(res))
 	for _, r := range res {
-		out = append(out, Removal{Tool: r.tool, Kind: r.kind, Path: r.path, Action: r.action, Err: r.err})
+		out = append(out, Removal{Tool: r.tool, Kind: r.kind, Path: r.path, Action: r.action, Err: r.err, Note: r.note})
 	}
 	return out
 }
 
-// fileHasMarker reports whether path is readable and holds a marker block.
+// fileHasMarker reports whether path is readable and holds a complete
+// marker block.
 func fileHasMarker(path string) bool {
 	b, err := os.ReadFile(path)
-	return err == nil && markerRE.Match(b)
+	return err == nil && len(findMarkers(string(b))) > 0
 }
 
 // ownedFilePresent reports whether path exists as a regular file or a

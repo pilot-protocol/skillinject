@@ -68,6 +68,10 @@ type Outcome struct {
 	Action Action   `json:"action"`
 	Hash   string   `json:"hash,omitempty"`
 	Err    string   `json:"err,omitempty"`
+	// Note explains a row whose State/Action alone would mislead: a
+	// heartbeat file shared with another tool (reconciled once, for that
+	// tool), or a retired plugin neutralized instead of removed.
+	Note string `json:"note,omitempty"`
 }
 
 // Report is the result of one Tick.
@@ -102,26 +106,28 @@ func classifySkill(path, wantHash string) State {
 }
 
 // classifyMarker inspects the heartbeat file at path and returns the State
-// of *our* marker block within it. wantShort is the markerHash of the
-// block the current tick would write.
+// of *our* marker block within it. skillShort and rShort are the hash= and
+// r= values of the block the current tick would write (see reconcile.go).
+// A block from an older release has no r= and is Drifted, so it is
+// rewritten in place once.
 //
 // More than one marker block in the same file is always Drifted, whatever
 // their hashes: writeMarker then collapses them to a single block, so a
 // file that picked up a duplicate (an old release appending instead of
 // replacing, a hand-merged dotfile) heals on the next tick instead of
 // carrying two directives forever.
-func classifyMarker(path, wantShort string) State {
+func classifyMarker(path, skillShort, rShort string) State {
 	cur, err := os.ReadFile(path)
 	if err != nil {
 		return StateAbsent
 	}
-	ms := markerRE.FindAllStringSubmatch(string(cur), -1)
+	blocks := findMarkers(string(cur))
 	switch {
-	case len(ms) == 0:
+	case len(blocks) == 0:
 		return StateAbsent
-	case len(ms) > 1:
+	case len(blocks) > 1:
 		return StateDrifted
-	case ms[0][1] == wantShort:
+	case blocks[0].hash == skillShort && blocks[0].r == rShort:
 		return StateIdentical
 	default:
 		return StateDrifted

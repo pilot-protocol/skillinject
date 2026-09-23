@@ -31,12 +31,12 @@ func TestWriteMarker_DollarSignsAreLiteral(t *testing.T) {
 		if err := os.WriteFile(appended, []byte("# user\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		old := "# user\n\n" + renderMarker("old body", "0123456789ab") + "\n# after\n"
+		old := "# user\n\n" + renderMarker("old body", "0123456789ab", "ba9876543210") + "\n# after\n"
 		if err := os.WriteFile(replaced, []byte(old), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		for _, p := range []string{newFile, appended, replaced} {
-			if err := writeMarker(p, ref, "abcdef012345"); err != nil {
+			if err := writeMarker(p, ref, "abcdef012345", "543210fedcba"); err != nil {
 				t.Fatalf("writeMarker(%s): %v", p, err)
 			}
 			b, _ := os.ReadFile(p)
@@ -53,10 +53,10 @@ func TestWriteMarker_DollarSignsAreLiteral(t *testing.T) {
 
 func TestSpliceMarker_KeepsFirstDropsRest(t *testing.T) {
 	t.Parallel()
-	a := renderMarker("A", "aaaaaaaaaaaa")
-	b := renderMarker("B", "bbbbbbbbbbbb")
+	a := renderMarker("A", "aaaaaaaaaaaa", "111111111111")
+	b := renderMarker("B", "bbbbbbbbbbbb", "222222222222")
 	s := "top\n" + a + "mid\n" + b + "\n\nend\n"
-	got := spliceMarker(s, markerRE.FindAllStringIndex(s, -1), "NEW\n")
+	got := spliceMarker(s, findMarkers(s), "NEW\n")
 	if want := "top\nNEW\nmid\nend\n"; got != want {
 		t.Fatalf("spliceMarker:\n got %q\nwant %q", got, want)
 	}
@@ -66,30 +66,34 @@ func TestClassifyMarker_States(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.md")
-	if s := classifyMarker(p, "abc"); s != StateAbsent {
+	if s := classifyMarker(p, "abc", "def"); s != StateAbsent {
 		t.Errorf("missing file: %s", s)
 	}
-	one := renderMarker("x", "aaaaaaaaaaaa")
+	one := renderMarker("x", "aaaaaaaaaaaa", "111111111111")
 	for _, tc := range []struct {
 		body string
 		want State
 	}{
 		{"no block\n", StateAbsent},
 		{one, StateIdentical},
-		{renderMarker("x", "bbbbbbbbbbbb"), StateDrifted},
+		{renderMarker("x", "bbbbbbbbbbbb", "111111111111"), StateDrifted}, // SKILL.md changed
+		{renderMarker("x", "aaaaaaaaaaaa", "222222222222"), StateDrifted}, // block changed
+		// A block from an older release has hash= only: rewritten once.
+		{"<!-- pilot:begin v=1 hash=aaaaaaaaaaaa\n     Inserted by pilot-daemon. Remove with: pilotctl skills disable\n-->\nx\n<!-- pilot:end -->\n", StateDrifted},
+		{"<!-- pilot:begin v=1 hash=aaaaaaaaaaaa -->\nx\n<!-- pilot:end -->\n", StateDrifted},
 		{one + "\n" + one, StateDrifted}, // duplicates always drift
 	} {
 		if err := os.WriteFile(p, []byte(tc.body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if s := classifyMarker(p, "aaaaaaaaaaaa"); s != tc.want {
+		if s := classifyMarker(p, "aaaaaaaaaaaa", "111111111111"); s != tc.want {
 			t.Errorf("classifyMarker(%q) = %s, want %s", tc.body, s, tc.want)
 		}
 	}
 }
 
 // markerHash moves with SKILL.md, the heartbeat body and the disclosure
-// line, is stable for equal inputs, and fits markerRE's hash group.
+// line, is stable for equal inputs, and round-trips through findMarkers.
 func TestMarkerHash(t *testing.T) {
 	t.Parallel()
 	base := markerHash("skill-1", "body")
@@ -106,12 +110,12 @@ func TestMarkerHash(t *testing.T) {
 		t.Errorf("hash %q is not 12 hex chars", base)
 	}
 	// The hash covers the whole rendered block, disclosure included.
-	if !strings.Contains(renderMarker("body", ""), markerDisclosure) {
+	if !strings.Contains(renderMarker("body", "", ""), markerDisclosure) {
 		t.Error("renderMarker does not carry the disclosure line")
 	}
-	m := markerRE.FindStringSubmatch("x\n" + renderMarker("body", base))
-	if m == nil || m[1] != base {
-		t.Fatalf("markerRE does not round-trip the block: %v", m)
+	bs := findMarkers("x\n" + renderMarker("body", "0123456789ab", base))
+	if len(bs) != 1 || bs[0].hash != "0123456789ab" || bs[0].r != base {
+		t.Fatalf("findMarkers does not round-trip the block: %+v", bs)
 	}
 }
 
@@ -121,7 +125,7 @@ func TestMarkerDisclosure_NamesWorkingCommand(t *testing.T) {
 		t.Fatalf("disclosure %q must name `pilotctl skills disable all`", markerDisclosure)
 	}
 	if strings.Contains(markerDisclosure, ">") {
-		t.Fatal("disclosure must not contain '>' (markerRE's header is [^>]*?)")
+		t.Fatal("disclosure must not contain '>' (markerHeaderRE's header is [^>]*?)")
 	}
 }
 

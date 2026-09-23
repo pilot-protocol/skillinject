@@ -99,7 +99,7 @@ func TestUninstall_PreservesUserContentAboveAndBelowMarker(t *testing.T) {
 
 	// The stripped file must be a substring of the original-with-marker
 	// (i.e. we removed bytes, not transformed them). Since marker stripping
-	// removes exactly markerRE matches, the rest is verbatim.
+	// removes exactly the complete marker blocks, the rest is verbatim.
 	if !strings.Contains(string(installed), string(got)) && string(got) != expectedPreservedContent {
 		// Either the stripped content matches the original verbatim (no
 		// rewriting in between) or it equals the pre-install content
