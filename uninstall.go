@@ -79,6 +79,9 @@ func (r *RemovalReport) Counts() map[RemovalKind]int {
 //   - Plugin allow-list JSON (openclaw.json) is restored from .pilot-bak
 //     when present, otherwise we inverse-merge: remove our id from the
 //     allow array and delete entries.<id>.
+//   - Surfaces an earlier manifest installed and the current one has
+//     retired (retired.go) are removed with the same rules, so a path the
+//     manifest stopped writing is not left behind.
 //
 // Network failures are tolerated: if the manifest can't be fetched we
 // fall back to the cached copy under ~/.pilot/skills-cache/. If that's
@@ -120,8 +123,15 @@ func Uninstall(ctx context.Context, cfg Config) (*RemovalReport, error) {
 
 		// After deleting the skill copy, try to remove its parent
 		// directory if it's now empty. Only one level up — never
-		// touch ~/.<tool>/skills/ itself.
-		pruneEmptyParent(skillPath)
+		// touch ~/.<tool>/skills/ itself. The directory layout is
+		// <skillsDir>/<entrypoint>/SKILL.md, so the entrypoint name is
+		// ours too; flat-layout tools write straight into skillsDir,
+		// which is never ours.
+		if mt.SkillNaming == "flat" {
+			pruneEmptyParent(skillPath)
+		} else {
+			pruneEmptyParent(skillPath, manifest.Entrypoint)
+		}
 
 		// (b) Heartbeat marker — file we co-inhabit. Strip only.
 		if mt.HeartbeatPath != "" {
@@ -164,6 +174,11 @@ func Uninstall(ctx context.Context, cfg Config) (*RemovalReport, error) {
 			}
 		}
 	}
+
+	// (e) Retired surfaces. After the active plugins, because restoring
+	// openclaw.json from .pilot-bak above can bring back a retired id that
+	// was in the config when the snapshot was taken.
+	report.Removals = append(report.Removals, removeRetired(collectRetired(manifest, home))...)
 
 	return report, nil
 }
@@ -229,7 +244,7 @@ func stripMarkerFile(tool, path string) Removal {
 		r.Action = RemovalNoop
 		return r
 	}
-	stripped := markerRE.ReplaceAllString(string(cur), "")
+	stripped := markerRE.ReplaceAllLiteralString(string(cur), "")
 	if err := writeFile(path, []byte(stripped)); err != nil {
 		r.Action = RemovalError
 		r.Err = err.Error()
@@ -373,11 +388,20 @@ func removeEntriesEntry(obj map[string]any, jsonPath, id string) bool {
 
 // pruneEmptyParent removes the parent directory of path iff it is now
 // empty AND its basename is "pilot-protocol" (our well-known subdir
-// name). The basename check is a belt-and-suspenders guard: we never
-// rm an empty parent that wasn't ours.
-func pruneEmptyParent(path string) {
+// name) or one of ours (the caller passes the manifest entrypoint, e.g.
+// "pilotctl", whose directory the skill copy lives in). The basename
+// check is a belt-and-suspenders guard: we never rm an empty parent that
+// wasn't ours.
+func pruneEmptyParent(path string, ours ...string) {
 	dir := filepath.Dir(path)
-	if filepath.Base(dir) != "pilot-protocol" {
+	base := filepath.Base(dir)
+	owned := base == "pilot-protocol"
+	for _, n := range ours {
+		if n != "" && base == n {
+			owned = true
+		}
+	}
+	if !owned {
 		return
 	}
 	if !dirIsEmpty(dir) {

@@ -23,8 +23,10 @@
 //     block (see writeMarker / classifyMarker) — operator content is never
 //     touched.
 //   - It is opt-out at any time: GetMode (config.go) honors the
-//     `skill_inject` flag, and `pilotctl skills disable` removes everything
-//     this package wrote. Default-on so fresh installs work without a step.
+//     `skill_inject` flag, and `pilotctl skills disable all` removes
+//     everything this package wrote — including surfaces an earlier
+//     manifest installed and the current one has retired (retired.go).
+//     Default-on so fresh installs work without a step.
 //
 // The purpose is to make agents reach for Pilot before their host's default
 // tools — the value of a third-party overlay only lands if it is the default
@@ -135,7 +137,7 @@ func Run(ctx context.Context, cfg Config) {
 // fallback. Exposed for tests, one-shot use, and `pilotctl skills check`.
 //
 // If the user has set skill injection to disabled mode via
-// `pilotctl skills disable` (persisted in ~/.pilot/config.json),
+// `pilotctl skills disable all` (persisted in ~/.pilot/config.json),
 // Tick returns an empty report without touching disk or the network.
 func Tick(ctx context.Context, cfg Config) (*Report, error) {
 	tickMu.Lock()
@@ -150,7 +152,7 @@ func Tick(ctx context.Context, cfg Config) (*Report, error) {
 // post-update reconcile in `pilotctl update`.
 //
 // It does NOT override the disabled opt-out: once the user has run
-// `pilotctl skills disable`, ForceTick is a no-op until they re-enable.
+// `pilotctl skills disable all`, ForceTick is a no-op until they re-enable.
 // (Enable persists mode=auto before calling in, so its reconcile still
 // runs.) Manual mode is not gated here, so a forced reconcile there
 // behaves exactly like Tick.
@@ -188,7 +190,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 		home = h
 	}
 
-	// Disabled is a hard opt-out: once the user runs `pilotctl skills disable`,
+	// Disabled is a hard opt-out: once the user runs `pilotctl skills disable all`,
 	// nothing WRITES skills back — not the periodic ticker, and not a forced
 	// reconcile from `pilotctl skills check`, `pilotctl update`, or an installer
 	// re-run. Only the read-only dry run (Plan, behind `pilotctl skills` status)
@@ -203,7 +205,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Cache the manifest so `pilotctl skills disable` can find everything
+	// Cache the manifest so `pilotctl skills disable all` can find everything
 	// we wrote without depending on the network. Best-effort.
 	if manifestBytes, mErr := manifestJSON(manifest); mErr == nil && !dryRun {
 		_ = writeCache(home, manifestCacheRel, manifestBytes)
@@ -220,7 +222,6 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	}
 
 	skillHash := sha256Hex(skillBody)
-	skillShort := skillHash[:12]
 
 	report := &Report{At: time.Now().UTC()}
 
@@ -302,6 +303,9 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 		}
 
 		ref, err := renderHeartbeat(tmplBody, heartbeatVars{EntrypointPath: skillPath})
+		if err == nil {
+			err = validateMarkerRef(ref)
+		}
 		if err != nil {
 			report.Outcomes = append(report.Outcomes, Outcome{
 				Tool: mt.Name, Kind: KindMarker,
@@ -318,14 +322,17 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 		if strings.HasSuffix(hbPath, "SOUL.md") {
 			slog.Warn("skillinject: writing SOUL.md for Hermes; gateway-mode Hermes ignores this file (issue #26596) -- write is a no-op for gateway users", "path", hbPath)
 		}
-		mState := classifyMarker(hbPath, skillShort)
+		// The marker hash covers SKILL.md and the rendered block, so a
+		// heartbeat-template-only change is Drifted and ships.
+		mShort := markerHash(skillHash, ref)
+		mState := classifyMarker(hbPath, mShort)
 		mAction := actionFor(mState)
 		mo := Outcome{
 			Tool: mt.Name, Kind: KindMarker, Path: hbPath,
-			State: mState, Action: mAction, Hash: skillShort,
+			State: mState, Action: mAction, Hash: mShort,
 		}
 		if mAction != ActionNoop && !dryRun {
-			if err := writeMarker(hbPath, ref, skillShort); err != nil {
+			if err := writeMarker(hbPath, ref, mShort); err != nil {
 				mo.Action = ActionError
 				mo.Err = err.Error()
 			}
@@ -355,6 +362,14 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 			}
 		}
 	}
+
+	// (e) retired surfaces: marker blocks, plugins and helpers that an
+	// earlier manifest installed and the current one no longer manages.
+	// Runs after the active surfaces so a plugin allow-list merge above
+	// and the retired-id removal here touch openclaw.json in a fixed
+	// order. Only surfaces still present on disk produce an Outcome.
+	report.Outcomes = append(report.Outcomes,
+		pruneRetired(collectRetired(manifest, home), dryRun)...)
 
 	return report, nil
 }
@@ -418,7 +433,8 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 // reason an installer enables the thing you just installed. It is bounded
 // and reversible: we only ever add OUR id (`p.ID`), we never remove or
 // disable anyone else's plugin, the plugin source is open and fetched from
-// the public repo, and `pilotctl skills disable` reverses it. An operator
+// the public repo, and `pilotctl skills disable all` reverses it (and a
+// plugin the manifest later retires is removed again, see retired.go). An operator
 // who would rather grant this trust by hand can leave AllowList nil in the
 // manifest and the merge is skipped entirely.
 func reconcilePluginAllowList(p *ManifestPlugin, home string, dryRun bool) Outcome {

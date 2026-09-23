@@ -39,6 +39,10 @@ type Manifest struct {
 	Description string           `json:"description,omitempty"`
 	Tools       []ManifestTool   `json:"tools"`
 	Helpers     []ManifestHelper `json:"helpers,omitempty"`
+	// Retired lists surfaces earlier manifests installed that this one no
+	// longer manages; every tick and Uninstall remove them. Merged with the
+	// built-in list in retired.go. Optional.
+	Retired *ManifestRetired `json:"retired,omitempty"`
 }
 
 // ManifestHelper is one helper script the daemon installs at a

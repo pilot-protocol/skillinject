@@ -33,8 +33,18 @@ to be earned with full transparency, so here is the whole story:
   wasn't signed by the expected key.
 - **It is non-destructive.** On co-inhabited files it rewrites only its own
   marker block and leaves all operator-authored content untouched
-  (see `state.go`/`reconcile.go`). Path-traversal in manifest filenames is
-  rejected.
+  (see `state.go`/`reconcile.go`). The block is inserted as literal text
+  (a `$5` in a heartbeat stays `$5`), and its `hash=` covers the entrypoint
+  `SKILL.md` *and* the rendered block, so a heartbeat-only edit is shipped
+  on the next tick. Path-traversal in manifest filenames is rejected.
+- **It cleans up after itself.** When the manifest stops managing a path
+  or plugin (for example OpenClaw's old `workspace/HEARTBEAT.md` block and
+  the retired `pilotprotocol-prompt-injector` plugin), every tick and
+  `pilotctl skills disable all` remove it: the marker block is stripped
+  from the user's file, the plugin id is dropped from `openclaw.json`, then
+  the plugin files are deleted. The list is built in (`retired.go`) and can
+  be extended by the manifest's `retired` key; anything the current
+  manifest still manages is never treated as retired.
 - **It is opt-out, anytime.** Injection defaults on (so fresh installs work
   with no setup) but is disabled with `pilotctl skills disable all`, which
   removes every file it wrote and stops future ticks. The flag persists in
@@ -59,8 +69,15 @@ skillinject.Run(ctx, skillinject.Config{ /* ... */ })
 // Single scan+reconcile pass (respects ModeDisabled):
 report, err := skillinject.Tick(ctx, skillinject.Config{ /* ... */ })
 
-// Single scan+reconcile pass, ignoring ModeDisabled (e.g. post-update):
+// Immediate pass outside the ticker (pilotctl skills check / update).
+// Also respects ModeDisabled:
 report, err = skillinject.ForceTick(ctx, skillinject.Config{ /* ... */ })
+
+// Read-only preview of what the next pass would do (pilotctl skills status):
+report, err = skillinject.Plan(ctx, skillinject.Config{ /* ... */ })
+
+// Remove everything ever written (pilotctl skills disable all):
+removed, err := skillinject.Uninstall(ctx, skillinject.Config{ /* ... */ })
 ```
 
 ## Layout
@@ -73,6 +90,7 @@ report, err = skillinject.ForceTick(ctx, skillinject.Config{ /* ... */ })
 | `reconcile.go` | Per-tick state machine: Absent → install, Drifted → rewrite, Identical → noop. |
 | `state.go` | File-state classifier (sha256 + heartbeat-marker parsing). |
 | `uninstall.go` | Strip-only on co-inhabited files; delete-safe in pilot-owned subdirs. |
+| `retired.go` | Surfaces older manifests installed and the current one dropped; removed on every tick and on uninstall. |
 | `plugin_allowlist.go` | OpenClaw allow-list JSON merge and `.pilot-bak` snapshot. |
 | `service.go` | `*Service` — `coreapi.Service` adapter. Build tag `!no_skillinject`. |
 | `service_disabled.go` | Stub when `-tags no_skillinject` is set. |

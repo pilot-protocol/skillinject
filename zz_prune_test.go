@@ -77,3 +77,25 @@ func TestDirIsEmpty_NonEmptyReturnsFalse(t *testing.T) {
 		t.Error("non-empty dir: want false")
 	}
 }
+
+// The skill copy lives in <skillsDir>/<entrypoint>/ ("pilotctl"), so
+// that directory is removed once empty; any other name is still kept.
+func TestPruneEmptyParent_EntrypointDirRemoved(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	ours := filepath.Join(root, "pilotctl")
+	other := filepath.Join(root, "someone-else")
+	for _, d := range []string{ours, other} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	pruneEmptyParent(filepath.Join(ours, "SKILL.md"), "pilotctl")
+	pruneEmptyParent(filepath.Join(other, "SKILL.md"), "pilotctl", "")
+	if _, err := os.Stat(ours); !os.IsNotExist(err) {
+		t.Errorf("empty entrypoint dir should be removed: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("dir with another name removed: %v", err)
+	}
+}

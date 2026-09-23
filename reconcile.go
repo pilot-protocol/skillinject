@@ -104,18 +104,66 @@ func ParseFileMode(s string) os.FileMode {
 // are recognised so disable cleans up markers from any released version.
 var markerRE = regexp.MustCompile(`(?s)<!-- pilot:begin v=1 hash=([0-9a-f]+)[^>]*?-->.*?<!-- pilot:end -->\n*`)
 
+// markerBeginToken and markerEndToken are the literal delimiters of a
+// marker block. A rendered heartbeat must not contain either one (see
+// validateMarkerRef).
+const (
+	markerBeginToken = "<!-- pilot:begin"
+	markerEndToken   = "<!-- pilot:end -->"
+)
+
+// markerDisclosure is the line inside every block's begin comment telling
+// whoever opens the file what the block is and how to remove it. The
+// command has to be one that works as printed: `pilotctl skills disable`
+// without an argument is rejected ("skill id required").
+const markerDisclosure = "Inserted by pilot-daemon. Remove with: pilotctl skills disable all"
+
+// markerHash is the hash written into a block's begin comment and compared
+// by classifyMarker. It covers the entrypoint SKILL.md (skillHash) AND the
+// complete rendered block — disclosure line plus heartbeat body — so a
+// change to any of them re-renders the block on the next tick. Before this
+// the hash was the SKILL.md hash alone, so an edit to a heartbeat template
+// (or to the disclosure line) never reached hosts until SKILL.md also
+// changed.
+//
+// The block is hashed as renderMarker(ref, "") — i.e. with an empty hash
+// field — because the hash cannot cover itself.
+//
+// Compatibility: blocks written by earlier releases carry the old
+// SKILL.md-only hash, which never equals this one, so every existing block
+// is rewritten in place exactly once after upgrade and is Identical from
+// then on. The marker version stays v=1 on purpose: markerRE in older
+// releases only recognises v=1, and a v=2 block would make an older binary
+// on the same host append a second block instead of replacing this one.
+func markerHash(skillHash, ref string) string {
+	return sha256Hex([]byte(skillHash + "\n" + renderMarker(ref, "")))[:12]
+}
+
+// validateMarkerRef rejects a rendered heartbeat that contains a marker
+// delimiter. markerRE ends a block at the first end token, so a body that
+// quoted one would be split on the next rewrite, leaving the tail of the
+// old body behind as unmanaged text that grows with every hash change.
+func validateMarkerRef(ref string) error {
+	if strings.Contains(ref, markerBeginToken) || strings.Contains(ref, markerEndToken) {
+		return fmt.Errorf("rendered heartbeat contains a pilot marker delimiter (%q or %q); refusing to write", markerBeginToken, markerEndToken)
+	}
+	return nil
+}
+
 // writeMarker inserts or replaces our marker block in path. If the file
-// doesn't exist it is created with just the marker block. If a marker
-// block exists with any hash it is replaced in place; otherwise the
-// block is inserted at the top of the body (after any YAML frontmatter).
+// doesn't exist it is created with just the marker block. If one or more
+// marker blocks exist (any hash) the first is replaced in place and any
+// others are removed; otherwise the block is appended at the bottom of the
+// body (after any YAML frontmatter).
+//
+// The block is spliced in as literal text. It must never go through
+// regexp.ReplaceAllString: that treats `$1`, `$5`, `${x}` in the
+// replacement as capture-group references, so "**$5 budget**" in a
+// heartbeat template came out as "** budget**" on every rewrite.
 //
 // Empirical pilot-first behavior is best when our directive lives in a
-// SECONDARY heartbeat file (e.g. HEARTBEAT.md) rather than the primary
-// AGENTS.md the user actively manages. The pilot-skills manifest now
-// targets HEARTBEAT.md for OpenClaw/PicoClaw — see inject-manifest.json.
-// In that secondary file the directive isn't competing with the user's
-// primary instructions and reaches ~91% pilot-first across diverse
-// prompts (validated against Gemini 3 Pro).
+// file the tool loads every session but the user rarely edits by hand; the
+// pilot-skills inject-manifest.json picks that file per tool.
 func writeMarker(path, ref, short string) error {
 	block := renderMarker(ref, short)
 
@@ -130,10 +178,8 @@ func writeMarker(path, ref, short string) error {
 	} else {
 		current := string(existing)
 
-		if markerRE.MatchString(current) {
-			// Replace existing marker in place.
-			current = markerRE.ReplaceAllString(current, block)
-			next = []byte(current)
+		if locs := markerRE.FindAllStringIndex(current, -1); len(locs) > 0 {
+			next = []byte(spliceMarker(current, locs, block))
 		} else {
 			// Append at the bottom of the file so user persona sections
 			// (e.g. SOUL.md identity, AGENTS.md workspace instructions)
@@ -167,15 +213,30 @@ func writeMarker(path, ref, short string) error {
 	return nil
 }
 
+// spliceMarker returns s with the first marker block (locs[0]) replaced by
+// block and every further block (locs[1:]) removed. Text between and
+// around blocks is kept byte-for-byte. locs are markerRE match indices in
+// ascending order. Pure string concatenation — no template expansion.
+func spliceMarker(s string, locs [][]int, block string) string {
+	var b strings.Builder
+	b.Grow(len(s) + len(block))
+	b.WriteString(s[:locs[0][0]])
+	b.WriteString(block)
+	prev := locs[0][1]
+	for _, l := range locs[1:] {
+		b.WriteString(s[prev:l[0]])
+		prev = l[1]
+	}
+	b.WriteString(s[prev:])
+	return b.String()
+}
+
 // renderMarker formats the marker block. The begin comment carries a
 // self-disclosure line explaining where the block came from and how to
 // remove it — so anyone opening their CLAUDE.md / AGENTS.md / etc. and
 // finding the block knows in one read what it is.
 func renderMarker(ref, short string) string {
-	return fmt.Sprintf(
-		"<!-- pilot:begin v=1 hash=%s\n     Inserted by pilot-daemon. Remove with: pilotctl skills disable\n-->\n%s\n<!-- pilot:end -->\n",
-		short, ref,
-	)
+	return "<!-- pilot:begin v=1 hash=" + short + "\n     " + markerDisclosure + "\n-->\n" + ref + "\n" + markerEndToken + "\n"
 }
 
 // frontmatterRE matches a YAML frontmatter block at the very start of a

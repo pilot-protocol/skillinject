@@ -17,6 +17,10 @@ const (
 	StateIdentical State = "identical"
 	// File/marker exists but the content/hash differs from canonical.
 	StateDrifted State = "drifted"
+	// File/marker/plugin was installed by an earlier manifest that the
+	// current one no longer manages (see retired.go). Present on disk and
+	// due for removal.
+	StateRetired State = "retired"
 )
 
 // Action is what the reconcile loop chose to do in response to a State.
@@ -27,6 +31,9 @@ const (
 	ActionCreate  Action = "create"
 	ActionRewrite Action = "rewrite"
 	ActionError   Action = "error"
+	// ActionRemove: a retired surface is stripped (marker block) or
+	// deleted (owned file, allow-list entry). See retired.go.
+	ActionRemove Action = "remove"
 )
 
 // FileKind names which of a target's managed surfaces an Outcome is
@@ -68,8 +75,8 @@ type Report struct {
 	At       time.Time `json:"at"`
 	Outcomes []Outcome `json:"outcomes"`
 	Skipped  []string  `json:"skipped,omitempty"`
-	// Disabled is true if the tick was a no-op because the user has
-	// `pilotctl skills disable`'d injection.
+	// Disabled is true if the tick was a no-op because the user has run
+	// `pilotctl skills disable all`.
 	Disabled bool `json:"disabled,omitempty"`
 }
 
@@ -95,20 +102,30 @@ func classifySkill(path, wantHash string) State {
 }
 
 // classifyMarker inspects the heartbeat file at path and returns the State
-// of *our* marker block within it.
+// of *our* marker block within it. wantShort is the markerHash of the
+// block the current tick would write.
+//
+// More than one marker block in the same file is always Drifted, whatever
+// their hashes: writeMarker then collapses them to a single block, so a
+// file that picked up a duplicate (an old release appending instead of
+// replacing, a hand-merged dotfile) heals on the next tick instead of
+// carrying two directives forever.
 func classifyMarker(path, wantShort string) State {
 	cur, err := os.ReadFile(path)
 	if err != nil {
 		return StateAbsent
 	}
-	m := markerRE.FindStringSubmatch(string(cur))
-	if m == nil {
+	ms := markerRE.FindAllStringSubmatch(string(cur), -1)
+	switch {
+	case len(ms) == 0:
 		return StateAbsent
-	}
-	if m[1] == wantShort {
+	case len(ms) > 1:
+		return StateDrifted
+	case ms[0][1] == wantShort:
 		return StateIdentical
+	default:
+		return StateDrifted
 	}
-	return StateDrifted
 }
 
 // classifyPluginFile inspects a plugin source file at path and returns
