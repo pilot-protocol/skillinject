@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "entrypoint": "pilotctl",
+  "description": "Routing manifest consumed by the pilot-daemon's skillinject loop. Declares the entrypoint skill, the curated set of skills referenced from the entrypoint, and per-tool injection paths. The pilot-daemon fetches this file at runtime from the pilot-skills repo over HTTPS — there is no embedded copy.",
+  "referencedSkills": [
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-protocol/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-momy/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-sandbox/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-verify/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-trust-circle/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-auto-trust/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-chat/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-group-chat/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-announce-capabilities/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-academic/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-books/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-climate/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-culture/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-data/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-dev/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-economics/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-entertainment/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-finance/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-flights/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-food/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-geo/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-gov-finance/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-government/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-health/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-infra/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-knowledge/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-language/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-music/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-nature/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-news/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-packages/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-reference/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-science/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-security/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-space/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-sports/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-traffic/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-transit/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-vehicles/SKILL.md",
+    "https://github.com/TeoSlayer/pilot-skills/blob/main/skills/pilot-service-agents-weather/SKILL.md"
+  ],
+  "helpers": [],
+  "tools": [
+    {
+      "name": "openclaw",
+      "rootDir": "~/.openclaw",
+      "skillsDir": "~/.openclaw/skills",
+      "heartbeatPath": "~/.openclaw/workspace/AGENTS.md",
+      "heartbeatTemplate": "heartbeats/openclaw.md",
+      "plugins": [
+        {
+          "id": "pilotprotocol-webhook-receiver",
+          "installPath": "~/.openclaw/extensions/pilotprotocol-webhook-receiver",
+          "files": [
+            {
+              "name": "openclaw.plugin.json",
+              "src": "workflow-injection/openclaw/pilotprotocol-webhook-receiver/openclaw.plugin.json"
+            },
+            {
+              "name": "index.mjs",
+              "src": "workflow-injection/openclaw/pilotprotocol-webhook-receiver/index.mjs"
+            }
+          ],
+          "allowList": {
+            "configPath": "~/.openclaw/openclaw.json",
+            "allowListJsonPath": "plugins.allow",
+            "entriesJsonPath": "plugins.entries"
+          }
+        }
+      ],
+      "webhookURL": "http://127.0.0.1:18789/pilot-webhook"
+    },
+    {
+      "name": "picoclaw",
+      "rootDir": "~/.picoclaw",
+      "skillsDir": "~/.picoclaw/workspace/skills",
+      "heartbeatPath": "~/.picoclaw/workspace/HEARTBEAT.md",
+      "heartbeatTemplate": "heartbeats/picoclaw.md"
+    },
+    {
+      "name": "hermes",
+      "rootDir": "~/.hermes",
+      "skillsDir": "~/.hermes/skills",
+      "heartbeatPath": "~/.hermes/SOUL.md",
+      "heartbeatTemplate": "heartbeats/hermes.md",
+      "webhookRoutes": [
+        {
+          "configPath": "~/.hermes/config.yaml",
+          "routesYamlPath": "platforms.webhook.extra.routes",
+          "routeName": "pilot-events",
+          "route": {
+            "secret": "PILOT_PLACEHOLDER_OPERATOR_MUST_REPLACE",
+            "events": [
+              "message.received",
+              "file.received",
+              "handshake.received",
+              "trust.changed"
+            ],
+            "prompt": "Pilot {event}: from={data.from} size={data.size}",
+            "deliver_only": true
+          }
+        }
+      ],
+      "webhookURL": "http://127.0.0.1:8644/pilot-events"
+    },
+    {
+      "name": "claude-code",
+      "rootDir": "~/.claude",
+      "skillsDir": "~/.claude/skills",
+      "heartbeatPath": "~/.claude/CLAUDE.md",
+      "heartbeatTemplate": "heartbeats/claude-code.md"
+    },
+    {
+      "name": "openhands",
+      "rootDir": "~/.openhands",
+      "skillsDir": "~/.openhands/microagents",
+      "skillNaming": "flat",
+      "selfHeartbeat": true
+    },
+    {
+      "name": "goose",
+      "rootDir": "~/.config/goose",
+      "skillsDir": "~/.config/goose/skills",
+      "heartbeatPath": "~/.config/goose/.goosehints",
+      "heartbeatTemplate": "heartbeats/goose.md"
+    },
+    {
+      "name": "opencode",
+      "rootDir": "~/.config/opencode",
+      "skillsDir": "~/.config/opencode/skills",
+      "heartbeatPath": "~/.config/opencode/AGENTS.md",
+      "heartbeatTemplate": "heartbeats/opencode.md"
+    }
+  ],
+  "gatedTools": [
+    {
+      "name": "muse",
+      "rootDir": "~/workspace/skills",
+      "skillsDir": "~/workspace/skills",
+      "requireMarker": "~/.pilot/targets/muse",
+      "skillFormat": "muse"
+    }
+  ]
+}

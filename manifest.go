@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
-	"time"
 )
 
 // TODO: update to pilot-protocol/pilot-skills once that repo is transferred from TeoSlayer.
@@ -43,6 +42,41 @@ type Manifest struct {
 	// longer manages; every tick and Uninstall remove them. Merged with the
 	// built-in list in retired.go. Optional.
 	Retired *ManifestRetired `json:"retired,omitempty"`
+	// GatedTools are skill targets that are active only on hosts that
+	// opted in by creating a marker file under ~/.pilot (see gated.go).
+	// They have their own key, not rows in Tools, because releases that
+	// predate this field drop the key when they decode the manifest. A
+	// row in Tools would be installed by those releases on every host
+	// where its rootDir exists, with no marker check. Optional.
+	GatedTools []ManifestGatedTool `json:"gatedTools,omitempty"`
+}
+
+// ManifestGatedTool is one "gatedTools" row: a skill target whose
+// directory is too generic to detect by existence alone (Meta Muse loads
+// skills from ~/workspace/skills). Only the entrypoint skill copy is
+// installed; there is no heartbeat or plugin.
+type ManifestGatedTool struct {
+	Name string `json:"name"`
+	// RootDir must exist, and must be inside the home directory. Every
+	// file operation for this tool stays inside it (see gated.go).
+	RootDir string `json:"rootDir"`
+	// SkillsDir must be RootDir or inside it.
+	SkillsDir string `json:"skillsDir"`
+	// SkillNaming is "" (directory layout, the default) or "flat", as
+	// for ManifestTool.
+	SkillNaming string `json:"skillNaming,omitempty"`
+	// RequireMarker is the file that turns the tool on, e.g.
+	// "~/.pilot/targets/muse". It must be inside ~/.pilot, and it must
+	// name SkillsDir and SkillFormat ("skills_dir=..." and
+	// "skill_format=..." lines, see gated.go). While it is absent, or
+	// names another directory or format, nothing under RootDir is read,
+	// written or removed.
+	RequireMarker string `json:"requireMarker"`
+	// SkillFormat names a rewrite applied to the entrypoint SKILL.md
+	// before it is written: "" copies it unchanged, SkillFormatMuse
+	// rewrites the frontmatter (see skillformat.go). An unknown value is
+	// an error row and nothing is written.
+	SkillFormat string `json:"skillFormat,omitempty"`
 }
 
 // ManifestHelper is one helper script the daemon installs at a
@@ -156,12 +190,17 @@ type fetcher struct {
 	publicKey   ed25519.PublicKey // nil = no key resolved
 	keyErr      error             // non-nil when a configured key failed to decode
 	requireSig  bool              // fail fetches when publicKey is nil
+	// ownsTransport: httpClient is the refreshing client newFetcher built
+	// (see proxy.go), which retries a 407 itself and whose idle
+	// connections close drops.
+	ownsTransport bool
 }
 
 func newFetcher(cfg Config) *fetcher {
 	c := cfg.HTTPClient
+	owns := false
 	if c == nil {
-		c = &http.Client{Timeout: 30 * time.Second}
+		c, owns = defaultHTTPClient(cfg)
 	}
 	mu := cfg.ManifestURL
 	if mu == "" {
@@ -176,12 +215,22 @@ func newFetcher(cfg Config) *fetcher {
 	}
 	key, keyErr := resolveManifestPublicKey(cfg)
 	return &fetcher{
-		httpClient:  c,
-		manifestURL: mu,
-		repoBase:    rb,
-		publicKey:   key,
-		keyErr:      keyErr,
-		requireSig:  requireSignedManifest(cfg),
+		httpClient:    c,
+		manifestURL:   mu,
+		repoBase:      rb,
+		publicKey:     key,
+		keyErr:        keyErr,
+		requireSig:    requireSignedManifest(cfg),
+		ownsTransport: owns,
+	}
+}
+
+// close releases the idle connections of a transport newFetcher built. A
+// client from Config.HTTPClient, or one on the shared
+// http.DefaultTransport, is left alone.
+func (f *fetcher) close() {
+	if f.ownsTransport {
+		f.httpClient.CloseIdleConnections()
 	}
 }
 
@@ -273,12 +322,29 @@ func decodeEd25519PublicKey(s string) (ed25519.PublicKey, error) {
 }
 
 func (f *fetcher) get(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
+	resp, err := f.do(ctx, url)
+	if err != nil && !f.ownsTransport && ctx.Err() == nil {
+		switch {
+		case proxyAuthRejected(err):
+			// The proxy refused the credentials, and the transport says so
+			// with a *netproxy.ConnectError: it follows a proxy resolver
+			// that refreshes them on a 407 (pilot-daemon's
+			// http.DefaultTransport does), so a second request goes out
+			// with the new ones.
+			resp, err = f.do(ctx, url)
+		case unreadableProxyReply(err):
+			// An answer net/http could not parse, which is how some
+			// proxies (Meta Muse's) reject expired credentials. The
+			// transport never saw a status, so it refreshed nothing
+			// itself; its resolver re-reads the credentials in the
+			// background once its interval has passed (pilot-daemon's:
+			// 60s, started by the lookup that just failed). Give that a
+			// moment, then retry once.
+			if sleepCtx(ctx, unreadableReplyRetryDelay) {
+				resp, err = f.do(ctx, url)
+			}
+		}
 	}
-	req.Header.Set("User-Agent", "pilot-daemon/skillinject")
-	resp, err := f.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -288,6 +354,16 @@ func (f *fetcher) get(ctx context.Context, url string) ([]byte, error) {
 	}
 	const maxBody = 1 << 20 // 1 MiB cap
 	return io.ReadAll(io.LimitReader(resp.Body, maxBody))
+}
+
+// do sends one GET for url.
+func (f *fetcher) do(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pilot-daemon/skillinject")
+	return f.httpClient.Do(req)
 }
 
 // fetchManifest grabs and parses the manifest from the configured URL.

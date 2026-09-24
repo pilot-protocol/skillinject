@@ -72,8 +72,20 @@ type Config struct {
 	// RepoBaseURL overrides the prefix used to resolve relative paths in
 	// the manifest (skills/<name>/SKILL.md, heartbeats/<tool>.md).
 	RepoBaseURL string
-	// HTTPClient overrides the HTTP client used for fetching.
+	// HTTPClient overrides the HTTP client used for fetching. When nil,
+	// the client follows the proxy environment and, with a ProxyCommand,
+	// re-reads rotating proxy credentials (see proxy.go).
 	HTTPClient *http.Client
+	// ProxyCommand is a shell command that prints the current egress
+	// proxy URL, for proxies that rotate the credentials in HTTPS_PROXY
+	// (Meta Muse): e.g. bash -c 'printf %s "$https_proxy"' (see proxy.go for the sandbox command).
+	// The default client runs it at the start of each tick, again once a
+	// minute while the tick runs, and when the proxy answers 407, and
+	// retries the refused request once. Empty means $PILOT_PROXY_CMD, then
+	// "proxy_cmd" in ~/.pilot/config.json (pilot-daemon's own settings),
+	// unless PILOT_PROXY or config.json "proxy" turns the proxy off.
+	// Ignored when HTTPClient is set.
+	ProxyCommand string
 	// ManifestPublicKey, when set, enables Ed25519 detached-signature
 	// verification on manifest + all fetched repo files. The daemon
 	// fetches <url>.sig alongside each resource and verifies before
@@ -215,6 +227,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	}
 
 	f := newFetcher(cfg)
+	defer f.close()
 
 	manifest, err := f.fetchManifest(ctx)
 	if err != nil {
@@ -250,6 +263,11 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	// noop row naming it.
 	type hbOwner struct{ tool, hash string }
 	hbOwners := map[string]hbOwner{}
+
+	// Skill copies the regular tools reconciled this tick, by the file
+	// they resolve to. A gated tool pointing at one of them is refused
+	// (see reconcileGatedTool).
+	skillOwners := map[string]string{}
 
 	// (0) install host-wide helpers (e.g. ~/.pilot/bin/pilot-ask). These
 	// are tool-agnostic and referenced from every tool's heartbeat
@@ -296,6 +314,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 
 		// (a) skill copy
 		skillPath := skillTargetPath(mt, manifest.Entrypoint, home)
+		skillOwners[canonicalPath(skillPath)] = mt.Name
 		state := classifySkill(skillPath, skillHash)
 		action := actionFor(state)
 		o := Outcome{
@@ -353,6 +372,17 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 					reconcilePluginAllowList(mt.Plugin, home, dryRun))
 			}
 		}
+	}
+
+	// Gated tools (gated.go): the skill copy only, and only on hosts that
+	// carry the tool's marker under ~/.pilot.
+	for _, gt := range manifest.GatedTools {
+		o, skipped := reconcileGatedTool(gt, manifest.Entrypoint, home, skillBody, skillOwners, dryRun)
+		if skipped {
+			report.Skipped = append(report.Skipped, gt.Name)
+			continue
+		}
+		report.Outcomes = append(report.Outcomes, o)
 	}
 
 	// (e) retired surfaces: marker blocks, plugins and helpers that an

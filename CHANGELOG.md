@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Gated tools: a new optional manifest key, `gatedTools`, for skill
+  targets whose directory is too generic to detect by existence alone.
+  A gated tool is active only while its `requireMarker` file exists and
+  names the tool's target, and that file must be inside `~/.pilot`. The
+  marker holds `skills_dir=<dir>` and `skill_format=<muse|canonical>`
+  lines; the tool is on only when `skills_dir` is the row's `skillsDir`
+  (after resolving symlinks) and `skill_format` its `skillFormat`. An empty
+  marker, one for another folder, and one for the canonical frontmatter
+  turn nothing on, so an installer run for another agent's skills folder,
+  or with the Muse frontmatter turned off, never makes the daemon write or
+  rewrite `~/workspace/skills`. The marker must be a regular file of at
+  most 4 KiB. Without a matching marker nothing under the tool's `rootDir`
+  is read, written or removed, by a tick or by `Uninstall`.
+  Only the entrypoint skill copy is installed; there is no heartbeat or
+  plugin. `rootDir` must be inside the home directory, `skillsDir` inside
+  `rootDir`. Every file operation goes through an `os.Root` on `rootDir`,
+  and a symlink at the skill file or at any directory between `rootDir`
+  and it is refused with an error row. Writes use an `O_EXCL` temp file
+  with a random name. A gated row that resolves to a regular tool's skill
+  copy is refused, so the two never rewrite each other. The key is new on
+  purpose: every released version decodes the manifest with plain
+  `json.Unmarshal` into a struct without it, so released daemons ignore
+  these rows. As a `tools` row, the same entry would be installed by every
+  released daemon on any host where the directory exists, with no marker
+  check.
+- `skillFormat: "muse"` (`SkillFormatMuse`) for Meta Muse, which loads
+  skills from `~/workspace/skills`: the entrypoint SKILL.md frontmatter is
+  rewritten to `name: "<entrypoint, - replaced by _>"` and a one-line
+  quoted `description` (folded values joined, capped at 1024 bytes), and
+  every other key is dropped. The body is unchanged. The output is byte
+  for byte what the pilot-skills Muse installer (`muse/install.sh`) writes,
+  so the two do not rewrite each other's copy.
+  `TestMuseSkillMD_MatchesInstaller` runs the installer's own shell
+  function against the Go port.
+
+- `Config.ProxyCommand` and credential refresh for the default HTTP
+  client. Egress proxies that rotate the credentials in `HTTPS_PROXY`
+  (Meta Muse) answered every tick after the first rotation with 407,
+  because the daemon keeps its launch-time environment. When
+  `Config.HTTPClient` is nil, the client is now a
+  `netproxy.RefreshingTransport` whose refresh command is
+  `Config.ProxyCommand`, else `$PILOT_PROXY_CMD`, else `"proxy_cmd"` in
+  `~/.pilot/config.json`, the same settings pilot-daemon reads. It runs at
+  the start of each tick, once a minute while it runs, and on a 407, and
+  the refused request is retried once. `PILOT_PROXY` or `config.json`
+  `"proxy"` set to off/none/no/false/direct turns it off. Without a
+  command the client is the plain one, and a 407 reported as a
+  `*netproxy.ConnectError` (pilot-daemon's `http.DefaultTransport` does so
+  after refreshing its own credentials) is retried once; a rejection the
+  proxy garbles ("malformed HTTP status code", Meta Muse's form, which never
+  reaches the transport's CONNECT hook) is retried once after 2s, when the
+  transport's resolver has had a chance to re-read the credentials in the
+  background.
+
+### Changed
+
+- `canonicalPath` resolves a path that does not exist yet through its
+  nearest existing ancestor, not only its parent directory, so two paths
+  that will name the same file compare equal before either is written.
+
+## [v0.2.4] - 2026-09-23
+
 ### Fixed
 
 - Heartbeat blocks are inserted as literal text. Rewrites went through
