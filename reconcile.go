@@ -345,16 +345,22 @@ func writeUserFile(path string, content []byte) error {
 
 // canonicalPath names the file p refers to once symlinks are resolved, so
 // two paths that reach the same file compare equal. A path that does not
-// exist yet is resolved through its parent directory, and failing that is
-// only cleaned.
+// exist yet is resolved through its nearest existing ancestor, and failing
+// that is only cleaned.
 func canonicalPath(p string) string {
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
+	p = filepath.Clean(p)
+	rest := ""
+	for dir := p; ; {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
 	}
-	if d, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
-		return filepath.Join(d, filepath.Base(p))
-	}
-	return filepath.Clean(p)
 }
 
 // frontmatterRE matches a YAML frontmatter block at the very start of a

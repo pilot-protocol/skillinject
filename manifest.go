@@ -43,6 +43,38 @@ type Manifest struct {
 	// longer manages; every tick and Uninstall remove them. Merged with the
 	// built-in list in retired.go. Optional.
 	Retired *ManifestRetired `json:"retired,omitempty"`
+	// GatedTools are skill targets that are active only on hosts that
+	// opted in by creating a marker file under ~/.pilot (see gated.go).
+	// They have their own key, not rows in Tools, because releases that
+	// predate this field drop the key when they decode the manifest. A
+	// row in Tools would be installed by those releases on every host
+	// where its rootDir exists, with no marker check. Optional.
+	GatedTools []ManifestGatedTool `json:"gatedTools,omitempty"`
+}
+
+// ManifestGatedTool is one "gatedTools" row: a skill target whose
+// directory is too generic to detect by existence alone (Meta Muse loads
+// skills from ~/workspace/skills). Only the entrypoint skill copy is
+// installed; there is no heartbeat or plugin.
+type ManifestGatedTool struct {
+	Name string `json:"name"`
+	// RootDir must exist, and must be inside the home directory. Every
+	// file operation for this tool stays inside it (see gated.go).
+	RootDir string `json:"rootDir"`
+	// SkillsDir must be RootDir or inside it.
+	SkillsDir string `json:"skillsDir"`
+	// SkillNaming is "" (directory layout, the default) or "flat", as
+	// for ManifestTool.
+	SkillNaming string `json:"skillNaming,omitempty"`
+	// RequireMarker is the file whose existence turns the tool on, e.g.
+	// "~/.pilot/targets/muse". It must be inside ~/.pilot. While it is
+	// absent, nothing under RootDir is read, written or removed.
+	RequireMarker string `json:"requireMarker"`
+	// SkillFormat names a rewrite applied to the entrypoint SKILL.md
+	// before it is written: "" copies it unchanged, SkillFormatMuse
+	// rewrites the frontmatter (see skillformat.go). An unknown value is
+	// an error row and nothing is written.
+	SkillFormat string `json:"skillFormat,omitempty"`
 }
 
 // ManifestHelper is one helper script the daemon installs at a

@@ -6,7 +6,8 @@
 
 Skill injector plugin for the Pilot Protocol daemon. Installs and keeps
 current the `SKILL.md` files in each detected agent tool's well-known
-directory (Claude Code, OpenClaw, PicoClaw, OpenHands, Hermes).
+directory (Claude Code, OpenClaw, PicoClaw, OpenHands, Hermes, and Meta
+Muse on hosts marked as Muse targets).
 Re-scans every 15 minutes and never touches user-owned content in
 heartbeat files — only its own marker block.
 
@@ -57,6 +58,15 @@ to be earned with full transparency, so here is the whole story:
   rewritten. The retired plugin's `index.mjs` is replaced with a no-op
   instead, and the daemon log and report say so once. Every removal is
   logged with its path.
+- **Generic directories need an explicit opt-in.** Tools listed under the
+  manifest's `gatedTools` key (today Meta Muse, which loads skills from
+  `~/workspace/skills`) are installed only on hosts that carry the tool's
+  marker file under `~/.pilot` (the Muse installer creates
+  `~/.pilot/targets/muse`). Without it nothing in that directory is read,
+  written or removed. Writes stay inside the tool's `rootDir`, never follow
+  a symlink, and only the entrypoint `SKILL.md` is written (rewritten into
+  the frontmatter shape Muse loads). Releases that predate the key ignore
+  it. See `gated.go`.
 - **It is opt-out, anytime.** Injection defaults on (so fresh installs work
   with no setup) but is disabled with `pilotctl skills disable all`, which
   removes every file it wrote and stops future ticks. The flag persists in
@@ -102,6 +112,8 @@ removed, err := skillinject.Uninstall(ctx, skillinject.Config{ /* ... */ })
 | `reconcile.go` | Per-tick state machine: Absent → install, Drifted → rewrite, Identical → noop. |
 | `state.go` | File-state classifier (sha256 + heartbeat-marker parsing). |
 | `uninstall.go` | Strip-only on co-inhabited files; delete-safe in pilot-owned subdirs. |
+| `gated.go` | Marker-gated targets (`gatedTools`, e.g. Meta Muse): active only while `requireMarker` exists; contained writes. |
+| `skillformat.go` | Per-target SKILL.md rewrites (`skillFormat: "muse"`). |
 | `retired.go` | Surfaces older manifests installed and the current one dropped; removed on every tick and on uninstall. |
 | `plugin_allowlist.go` | OpenClaw allow-list JSON merge and `.pilot-bak` snapshot. |
 | `service.go` | `*Service` — `coreapi.Service` adapter. Build tag `!no_skillinject`. |

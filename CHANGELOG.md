@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Gated tools: a new optional manifest key, `gatedTools`, for skill
+  targets whose directory is too generic to detect by existence alone.
+  A gated tool is active only while its `requireMarker` file exists, and
+  that file must be inside `~/.pilot`. Without it nothing under the tool's
+  `rootDir` is read, written or removed, by a tick or by `Uninstall`.
+  Only the entrypoint skill copy is installed; there is no heartbeat or
+  plugin. `rootDir` must be inside the home directory, `skillsDir` inside
+  `rootDir`. Every file operation goes through an `os.Root` on `rootDir`,
+  and a symlink at the skill file or at any directory between `rootDir`
+  and it is refused with an error row. Writes use an `O_EXCL` temp file
+  with a random name. A gated row that resolves to a regular tool's skill
+  copy is refused, so the two never rewrite each other. The key is new on
+  purpose: every released version decodes the manifest with plain
+  `json.Unmarshal` into a struct without it, so released daemons ignore
+  these rows. As a `tools` row, the same entry would be installed by every
+  released daemon on any host where the directory exists, with no marker
+  check.
+- `skillFormat: "muse"` (`SkillFormatMuse`) for Meta Muse, which loads
+  skills from `~/workspace/skills`: the entrypoint SKILL.md frontmatter is
+  rewritten to `name: "<entrypoint, - replaced by _>"` and a one-line
+  quoted `description` (folded values joined, capped at 1024 bytes), and
+  every other key is dropped. The body is unchanged. The output is byte
+  for byte what the pilot-skills Muse installer (`muse/install.sh`) writes,
+  so the two do not rewrite each other's copy.
+  `TestMuseSkillMD_MatchesInstaller` runs the installer's own shell
+  function against the Go port.
+
+### Changed
+
+- `canonicalPath` resolves a path that does not exist yet through its
+  nearest existing ancestor, not only its parent directory, so two paths
+  that will name the same file compare equal before either is written.
+
+## [v0.2.4] - 2026-09-23
+
 ### Fixed
 
 - Heartbeat blocks are inserted as literal text. Rewrites went through

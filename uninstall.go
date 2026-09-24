@@ -89,6 +89,8 @@ func (r *RemovalReport) Counts() map[RemovalKind]int {
 //   - Surfaces an earlier manifest installed and the current one has
 //     retired (retired.go) are removed with the same rules, so a path the
 //     manifest stopped writing is not left behind.
+//   - A gated tool's skill copy is deleted only while the tool's marker
+//     exists (gated.go); without it nothing under its rootDir is touched.
 //
 // Network failures are tolerated: if the manifest can't be fetched we
 // fall back to the cached copy under ~/.pilot/skills-cache/. If that's
@@ -180,6 +182,12 @@ func Uninstall(ctx context.Context, cfg Config) (*RemovalReport, error) {
 					removePluginAllowListEntry(mt.Plugin, cfgPath))
 			}
 		}
+	}
+
+	// Gated tools (gated.go): the skill copy, and only while the tool's
+	// marker exists.
+	for _, gt := range manifest.GatedTools {
+		report.Removals = append(report.Removals, removeGatedTool(gt, manifest.Entrypoint, home)...)
 	}
 
 	// (e) Retired surfaces. After the active plugins, because restoring
