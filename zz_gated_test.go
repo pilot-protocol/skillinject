@@ -44,10 +44,17 @@ func museSkillPath(home string) string {
 	return filepath.Join(home, "workspace", "skills", "pilotctl", "SKILL.md")
 }
 
+// markMuse writes the marker the Muse installer leaves after installing
+// Muse-format skills into ~/workspace/skills.
 func markMuse(t *testing.T, home string) {
 	t.Helper()
+	writeMarker(t, home, "# written by muse/install.sh\nskills_dir="+filepath.Join(home, "workspace", "skills")+"\nskill_format=muse\n")
+}
+
+func writeMarker(t *testing.T, home, content string) {
+	t.Helper()
 	mustMkdirAll(t, filepath.Join(home, ".pilot", "targets"))
-	mustWriteFile(t, filepath.Join(home, ".pilot", "targets", "muse"), "", 0o644)
+	mustWriteFile(t, filepath.Join(home, ".pilot", "targets", "muse"), content, 0o644)
 }
 
 func toolOutcome(rep *skillinject.Report, tool string) (skillinject.Outcome, bool) {

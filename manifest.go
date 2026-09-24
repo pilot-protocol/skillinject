@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
-	"time"
 )
 
 // TODO: update to pilot-protocol/pilot-skills once that repo is transferred from TeoSlayer.
@@ -66,9 +65,12 @@ type ManifestGatedTool struct {
 	// SkillNaming is "" (directory layout, the default) or "flat", as
 	// for ManifestTool.
 	SkillNaming string `json:"skillNaming,omitempty"`
-	// RequireMarker is the file whose existence turns the tool on, e.g.
-	// "~/.pilot/targets/muse". It must be inside ~/.pilot. While it is
-	// absent, nothing under RootDir is read, written or removed.
+	// RequireMarker is the file that turns the tool on, e.g.
+	// "~/.pilot/targets/muse". It must be inside ~/.pilot, and it must
+	// name SkillsDir and SkillFormat ("skills_dir=..." and
+	// "skill_format=..." lines, see gated.go). While it is absent, or
+	// names another directory or format, nothing under RootDir is read,
+	// written or removed.
 	RequireMarker string `json:"requireMarker"`
 	// SkillFormat names a rewrite applied to the entrypoint SKILL.md
 	// before it is written: "" copies it unchanged, SkillFormatMuse
@@ -188,12 +190,17 @@ type fetcher struct {
 	publicKey   ed25519.PublicKey // nil = no key resolved
 	keyErr      error             // non-nil when a configured key failed to decode
 	requireSig  bool              // fail fetches when publicKey is nil
+	// ownsTransport: httpClient is the refreshing client newFetcher built
+	// (see proxy.go), which retries a 407 itself and whose idle
+	// connections close drops.
+	ownsTransport bool
 }
 
 func newFetcher(cfg Config) *fetcher {
 	c := cfg.HTTPClient
+	owns := false
 	if c == nil {
-		c = &http.Client{Timeout: 30 * time.Second}
+		c, owns = defaultHTTPClient(cfg)
 	}
 	mu := cfg.ManifestURL
 	if mu == "" {
@@ -208,12 +215,22 @@ func newFetcher(cfg Config) *fetcher {
 	}
 	key, keyErr := resolveManifestPublicKey(cfg)
 	return &fetcher{
-		httpClient:  c,
-		manifestURL: mu,
-		repoBase:    rb,
-		publicKey:   key,
-		keyErr:      keyErr,
-		requireSig:  requireSignedManifest(cfg),
+		httpClient:    c,
+		manifestURL:   mu,
+		repoBase:      rb,
+		publicKey:     key,
+		keyErr:        keyErr,
+		requireSig:    requireSignedManifest(cfg),
+		ownsTransport: owns,
+	}
+}
+
+// close releases the idle connections of a transport newFetcher built. A
+// client from Config.HTTPClient, or one on the shared
+// http.DefaultTransport, is left alone.
+func (f *fetcher) close() {
+	if f.ownsTransport {
+		f.httpClient.CloseIdleConnections()
 	}
 }
 
@@ -305,12 +322,14 @@ func decodeEd25519PublicKey(s string) (ed25519.PublicKey, error) {
 }
 
 func (f *fetcher) get(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
+	resp, err := f.do(ctx, url)
+	if err != nil && !f.ownsTransport && proxyAuthRejected(err) && ctx.Err() == nil {
+		// The proxy refused the credentials, and the transport says so
+		// with a *netproxy.ConnectError: it follows a proxy resolver that
+		// refreshes them on a 407 (pilot-daemon's http.DefaultTransport
+		// does), so a second request goes out with the new ones.
+		resp, err = f.do(ctx, url)
 	}
-	req.Header.Set("User-Agent", "pilot-daemon/skillinject")
-	resp, err := f.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -320,6 +339,16 @@ func (f *fetcher) get(ctx context.Context, url string) ([]byte, error) {
 	}
 	const maxBody = 1 << 20 // 1 MiB cap
 	return io.ReadAll(io.LimitReader(resp.Body, maxBody))
+}
+
+// do sends one GET for url.
+func (f *fetcher) do(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pilot-daemon/skillinject")
+	return f.httpClient.Do(req)
 }
 
 // fetchManifest grabs and parses the manifest from the configured URL.

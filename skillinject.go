@@ -72,8 +72,20 @@ type Config struct {
 	// RepoBaseURL overrides the prefix used to resolve relative paths in
 	// the manifest (skills/<name>/SKILL.md, heartbeats/<tool>.md).
 	RepoBaseURL string
-	// HTTPClient overrides the HTTP client used for fetching.
+	// HTTPClient overrides the HTTP client used for fetching. When nil,
+	// the client follows the proxy environment and, with a ProxyCommand,
+	// re-reads rotating proxy credentials (see proxy.go).
 	HTTPClient *http.Client
+	// ProxyCommand is a shell command that prints the current egress
+	// proxy URL, for proxies that rotate the credentials in HTTPS_PROXY
+	// (Meta Muse): e.g. bash -c 'printf %s "${https_proxy:-$HTTPS_PROXY}"'.
+	// The default client runs it at the start of each tick, again once a
+	// minute while the tick runs, and when the proxy answers 407, and
+	// retries the refused request once. Empty means $PILOT_PROXY_CMD, then
+	// "proxy_cmd" in ~/.pilot/config.json (pilot-daemon's own settings),
+	// unless PILOT_PROXY or config.json "proxy" turns the proxy off.
+	// Ignored when HTTPClient is set.
+	ProxyCommand string
 	// ManifestPublicKey, when set, enables Ed25519 detached-signature
 	// verification on manifest + all fetched repo files. The daemon
 	// fetches <url>.sig alongside each resource and verifies before
@@ -215,6 +227,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	}
 
 	f := newFetcher(cfg)
+	defer f.close()
 
 	manifest, err := f.fetchManifest(ctx)
 	if err != nil {

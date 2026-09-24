@@ -61,12 +61,22 @@ to be earned with full transparency, so here is the whole story:
 - **Generic directories need an explicit opt-in.** Tools listed under the
   manifest's `gatedTools` key (today Meta Muse, which loads skills from
   `~/workspace/skills`) are installed only on hosts that carry the tool's
-  marker file under `~/.pilot` (the Muse installer creates
-  `~/.pilot/targets/muse`). Without it nothing in that directory is read,
-  written or removed. Writes stay inside the tool's `rootDir`, never follow
-  a symlink, and only the entrypoint `SKILL.md` is written (rewritten into
-  the frontmatter shape Muse loads). Releases that predate the key ignore
-  it. See `gated.go`.
+  marker file under `~/.pilot`, and only when that marker names the tool's
+  skills directory and format. The Muse installer writes
+  `~/.pilot/targets/muse` when it installs the Muse-format skills into
+  `~/workspace/skills`:
+
+  ```
+  skills_dir=/root/workspace/skills
+  skill_format=muse
+  ```
+
+  An empty marker, or one for another folder or for the canonical
+  frontmatter (`skill_format=canonical`), turns nothing on. Without a
+  matching marker nothing in that directory is read, written or removed.
+  Writes stay inside the tool's `rootDir`, never follow a symlink, and only
+  the entrypoint `SKILL.md` is written (rewritten into the frontmatter shape
+  Muse loads). Releases that predate the key ignore it. See `gated.go`.
 - **It is opt-out, anytime.** Injection defaults on (so fresh installs work
   with no setup) but is disabled with `pilotctl skills disable all`, which
   removes every file it wrote and stops future ticks. The flag persists in
@@ -102,6 +112,20 @@ report, err = skillinject.Plan(ctx, skillinject.Config{ /* ... */ })
 removed, err := skillinject.Uninstall(ctx, skillinject.Config{ /* ... */ })
 ```
 
+### Egress proxies that rotate their credentials
+
+Fetches follow the proxy environment (`HTTPS_PROXY`, `NO_PROXY`, ...). Some
+sandboxes (Meta Muse) rotate the credentials in `HTTPS_PROXY` every few
+minutes, and a long-running daemon keeps the ones it was started with. When
+`Config.HTTPClient` is nil, the client re-reads them with the same refresh
+command pilot-daemon uses: `Config.ProxyCommand`, else `$PILOT_PROXY_CMD`,
+else `"proxy_cmd"` in `~/.pilot/config.json` (the Pilot installers save
+`bash -c 'printf %s "${https_proxy:-$HTTPS_PROXY}"'` there on such hosts).
+The command runs at the start of each tick, again once a minute while it
+runs, and when the proxy answers 407, after which the refused request is
+retried once. Its output is never logged. `PILOT_PROXY=off` (or
+`config.json` `"proxy": "off"`) turns this off. See `proxy.go`.
+
 ## Layout
 
 | File | What it does |
@@ -112,7 +136,8 @@ removed, err := skillinject.Uninstall(ctx, skillinject.Config{ /* ... */ })
 | `reconcile.go` | Per-tick state machine: Absent → install, Drifted → rewrite, Identical → noop. |
 | `state.go` | File-state classifier (sha256 + heartbeat-marker parsing). |
 | `uninstall.go` | Strip-only on co-inhabited files; delete-safe in pilot-owned subdirs. |
-| `gated.go` | Marker-gated targets (`gatedTools`, e.g. Meta Muse): active only while `requireMarker` exists; contained writes. |
+| `gated.go` | Marker-gated targets (`gatedTools`, e.g. Meta Muse): active only while `requireMarker` names the target; contained writes. |
+| `proxy.go` | Default HTTP client: re-reads rotating egress proxy credentials with the daemon's refresh command. |
 | `skillformat.go` | Per-target SKILL.md rewrites (`skillFormat: "muse"`). |
 | `retired.go` | Surfaces older manifests installed and the current one dropped; removed on every tick and on uninstall. |
 | `plugin_allowlist.go` | OpenClaw allow-list JSON merge and `.pilot-bak` snapshot. |

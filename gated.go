@@ -8,9 +8,10 @@ package skillinject
 // ~/.openclaw, ...). That does not work for Meta Muse, which loads skills
 // from ~/workspace/skills: many hosts have a directory by that name that
 // has nothing to do with Muse. A gated tool is therefore active only while
-// its marker file exists. The marker has to be inside ~/.pilot, which only
-// Pilot's own installers write; the Muse installer creates
-// ~/.pilot/targets/muse.
+// its marker file exists and names the tool's skills directory and format.
+// The marker has to be inside ~/.pilot, which only Pilot's own installers
+// write; the Muse installer creates ~/.pilot/targets/muse when it installs
+// the Muse-format skills into ~/workspace/skills.
 //
 // Gated tools come from the manifest's "gatedTools" key, never from
 // "tools". Released daemons decode the manifest into a struct without that
@@ -23,8 +24,10 @@ package skillinject
 //
 //   - requireMarker must resolve inside ~/.pilot. Otherwise the row is an
 //     error and nothing happens.
-//   - While the marker is absent the tool is skipped: nothing under rootDir
-//     is read, written or removed, by a tick or by Uninstall.
+//   - The marker has to say which target it is for (see "Marker contents"
+//     below). While it is absent, or names another skills directory or
+//     format, the tool is skipped: nothing under rootDir is read, written
+//     or removed, by a tick or by Uninstall.
 //   - rootDir must be inside the home directory and exist, skillsDir must
 //     be rootDir or inside it, and the skill file must be inside skillsDir.
 //   - Every file operation goes through an os.Root opened on rootDir, so no
@@ -38,13 +41,39 @@ package skillinject
 //     a predictable temp name is never followed.
 //   - Only the entrypoint skill copy is installed. There is no heartbeat and
 //     no plugin.
+//
+// Marker contents. A marker file only proves that some Pilot installer ran,
+// and the Muse installer can be pointed at any skills folder
+// (MUSE_SKILLS_DIR) or told to keep the canonical frontmatter
+// (PILOT_MUSE_FRONTMATTER=0). So the marker records what the installer set
+// up, one key=value per line:
+//
+//	skills_dir=/root/workspace/skills
+//	skill_format=muse
+//
+// skills_dir is the folder the installer wrote the skills to (an absolute
+// path, or one starting with "~/"), and skill_format the frontmatter it gave
+// them ("muse", or "canonical" for the SKILL.md as published). The tool is
+// active only when skills_dir is the row's skillsDir (compared once
+// symlinks are resolved) and skill_format is the row's skillFormat. Blank
+// lines, lines starting with '#' and unknown keys are ignored. A marker
+// that is empty (a bare touch), is not a regular file, is larger than
+// 4 KiB, has a line without '=', or sets a key twice attests nothing, and
+// the tool stays off. Otherwise the daemon would write the Muse copy into
+// an unrelated ~/workspace/skills on a host where the installer served
+// another agent's folder, and rewrite a canonical copy the operator asked
+// for on every tick.
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,11 +101,118 @@ func gatedMarkerPath(gt ManifestGatedTool, home string) (string, error) {
 	return marker, nil
 }
 
-// markerPresent reports whether the marker exists. A marker that cannot
-// be checked counts as absent, which keeps the tool off.
-func markerPresent(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+// Marker keys and limits (see "Marker contents" above).
+const (
+	markerKeySkillsDir   = "skills_dir"
+	markerKeySkillFormat = "skill_format"
+	// markerFormatCanonical is the skill_format of a SKILL.md copied as
+	// published, which a row with an empty skillFormat writes.
+	markerFormatCanonical = "canonical"
+	markerMaxBytes        = 4 << 10
+)
+
+// gatedMarker is what a marker file says. err is set when the file is
+// there but attests nothing (not a regular file, too large, malformed).
+type gatedMarker struct {
+	skillsDir   string
+	skillFormat string
+	err         error
+}
+
+// readGatedMarker reads the marker at path. present is false when there
+// is no such file, or it cannot be checked, which keeps the tool off.
+func readGatedMarker(path string) (m gatedMarker, present bool) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return gatedMarker{}, false
+	}
+	if !fi.Mode().IsRegular() {
+		return gatedMarker{err: errors.New("the marker is not a regular file")}, true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return gatedMarker{err: err}, true
+	}
+	defer f.Close()
+	// The file opened must be the one checked: a symlink swapped in since
+	// Lstat would read a file outside ~/.pilot.
+	if ofi, err := f.Stat(); err != nil || !os.SameFile(fi, ofi) {
+		return gatedMarker{err: errors.New("the marker changed while it was read")}, true
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, markerMaxBytes+1))
+	if err != nil {
+		return gatedMarker{err: err}, true
+	}
+	if len(raw) > markerMaxBytes {
+		return gatedMarker{err: fmt.Errorf("the marker is larger than %d bytes", markerMaxBytes)}, true
+	}
+	return parseGatedMarker(raw), true
+}
+
+// parseGatedMarker parses the key=value lines of a marker.
+func parseGatedMarker(raw []byte) gatedMarker {
+	var m gatedMarker
+	seen := map[string]bool{}
+	sc := bufio.NewScanner(bytes.NewReader(raw))
+	for n := 1; sc.Scan(); n++ {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return gatedMarker{err: fmt.Errorf("marker line %d is not key=value", n)}
+		}
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if seen[key] {
+			return gatedMarker{err: fmt.Errorf("marker sets %s twice", key)}
+		}
+		seen[key] = true
+		switch key {
+		case markerKeySkillsDir:
+			m.skillsDir = value
+		case markerKeySkillFormat:
+			m.skillFormat = value
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return gatedMarker{err: err}
+	}
+	return m
+}
+
+// attests reports whether the marker is for gt's target: the same skills
+// directory, once symlinks are resolved, and the same skill format. The
+// error says what did not match.
+func (m gatedMarker) attests(gt ManifestGatedTool, home string) error {
+	if m.err != nil {
+		return m.err
+	}
+	if m.skillsDir == "" {
+		return fmt.Errorf("the marker does not say which skills directory it is for (%s=)", markerKeySkillsDir)
+	}
+	dir := expandHome(m.skillsDir, home)
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("the marker's %s %q is not an absolute path", markerKeySkillsDir, m.skillsDir)
+	}
+	want := filepath.Clean(expandHome(gt.SkillsDir, home))
+	if canonicalPath(dir) != canonicalPath(want) {
+		return fmt.Errorf("the marker is for %s, not %s", dir, want)
+	}
+	format := gt.SkillFormat
+	if format == "" {
+		format = markerFormatCanonical
+	}
+	if m.skillFormat != format {
+		return fmt.Errorf("the marker says %s=%q, the row writes %q", markerKeySkillFormat, m.skillFormat, format)
+	}
+	return nil
+}
+
+// logInactive notes, at debug level, why a marked gated tool is off.
+func logInactive(gt ManifestGatedTool, marker string, err error) {
+	slog.Debug("skillinject: gated tool inactive: its marker does not attest this target",
+		"tool", gt.Name, "marker", marker, "reason", err)
 }
 
 // resolveGatedTarget checks gt's paths and returns where its skill copy
@@ -127,11 +263,11 @@ func validIdentifier(s string) bool {
 }
 
 // reconcileGatedTool installs or refreshes one gated tool's skill copy.
-// skipped is true when the tool is inactive (marker or rootDir absent);
-// the Outcome is then empty. taken maps the canonical skill paths the
-// regular tools reconciled this tick to their tool names, so a gated row
-// that points at one of them is refused instead of rewriting it with
-// different bytes on every tick.
+// skipped is true when the tool is inactive (marker absent or not for
+// this target, or rootDir absent); the Outcome is then empty. taken maps
+// the canonical skill paths the regular tools reconciled this tick to
+// their tool names, so a gated row that points at one of them is refused
+// instead of rewriting it with different bytes on every tick.
 func reconcileGatedTool(gt ManifestGatedTool, entrypoint, home string, skillBody []byte, taken map[string]string, dryRun bool) (o Outcome, skipped bool) {
 	o = Outcome{Tool: gt.Name, Kind: KindSkill}
 	fail := func(err error) (Outcome, bool) {
@@ -145,24 +281,31 @@ func reconcileGatedTool(gt ManifestGatedTool, entrypoint, home string, skillBody
 		o.Path = gt.RequireMarker
 		return fail(err)
 	}
-	if !markerPresent(marker) {
+	decl, present := readGatedMarker(marker)
+	if !present {
 		return Outcome{}, true
 	}
+	// The row is checked before the marker's contents, so a broken row is
+	// an error on every marked host, whatever the marker says.
 	t, err := resolveGatedTarget(gt, entrypoint, home)
 	if err != nil {
 		o.Path = gt.SkillsDir
 		return fail(err)
 	}
 	o.Path = t.path
+	want, err := formatSkill(skillBody, gt.SkillFormat, entrypoint)
+	if err != nil {
+		return fail(err)
+	}
 	if !dirExists(t.rootDir) {
 		return Outcome{}, true
 	}
 	if owner, ok := taken[canonicalPath(t.path)]; ok {
 		return fail(fmt.Errorf("%s is also the %s skill copy; refusing to write it twice", t.path, owner))
 	}
-	want, err := formatSkill(skillBody, gt.SkillFormat, entrypoint)
-	if err != nil {
-		return fail(err)
+	if err := decl.attests(gt, home); err != nil {
+		logInactive(gt, marker, err)
+		return Outcome{}, true
 	}
 	o.Hash = sha256Hex(want)
 
@@ -188,8 +331,9 @@ func reconcileGatedTool(gt ManifestGatedTool, entrypoint, home string, skillBody
 
 // removeGatedTool is Uninstall for one gated tool: it deletes the skill
 // copy and, for the directory layout, the entrypoint directory if that
-// leaves it empty. It returns no rows while the tool is inactive, since
-// nothing under rootDir may be touched then.
+// leaves it empty. It returns no rows while the tool is inactive (marker
+// absent or not for this target), since nothing under rootDir may be
+// touched then.
 func removeGatedTool(gt ManifestGatedTool, entrypoint, home string) []Removal {
 	r := Removal{Tool: gt.Name, Kind: KindSkill}
 	fail := func(err error) []Removal {
@@ -203,13 +347,19 @@ func removeGatedTool(gt ManifestGatedTool, entrypoint, home string) []Removal {
 		r.Path = gt.RequireMarker
 		return fail(err)
 	}
-	if !markerPresent(marker) {
+	decl, present := readGatedMarker(marker)
+	if !present {
 		return nil
 	}
 	t, err := resolveGatedTarget(gt, entrypoint, home)
 	if err != nil {
 		r.Path = gt.SkillsDir
 		return fail(err)
+	}
+	if err := decl.attests(gt, home); err != nil {
+		// Not this target: the file there is someone else's.
+		logInactive(gt, marker, err)
+		return nil
 	}
 	r.Path = t.path
 	if !dirExists(t.rootDir) {

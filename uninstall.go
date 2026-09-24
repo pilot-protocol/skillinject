@@ -203,6 +203,7 @@ func Uninstall(ctx context.Context, cfg Config) (*RemovalReport, error) {
 // manifest, whether we used the offline fallback, and any error.
 func loadManifestForUninstall(ctx context.Context, cfg Config, home string) (*Manifest, bool, error) {
 	f := newFetcher(cfg)
+	defer f.close()
 	if m, err := f.fetchManifest(ctx); err == nil {
 		return m, false, nil
 	}
