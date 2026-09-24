@@ -39,6 +39,10 @@ type rotatingProxy struct {
 	// credFile holds the current proxy URL, as a fresh Muse shell sees it.
 	credFile string
 
+	// garble: reject credentials with a status line net/http cannot parse
+	// ("HTTP/1.1 4O7 ..."), as Meta Muse's proxy does, instead of a 407.
+	garble atomic.Bool
+
 	mu  sync.Mutex
 	log []string // "ALLOW gen=N" / "DENY 407 gen=N"
 }
@@ -129,6 +133,10 @@ func (p *rotatingProxy) handle(c net.Conn) {
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("muse:"+p.password(gen)))
 	if req.Header.Get("Proxy-Authorization") != want {
 		p.record(fmt.Sprintf("DENY 407 gen=%d", gen))
+		if p.garble.Load() {
+			_, _ = io.WriteString(c, "HTTP/1.1 4O7 Proxy Authentication Required\r\n\r\n")
+			return
+		}
 		_, _ = io.WriteString(c, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"muse\"\r\n\r\n")
 		return
 	}
@@ -434,6 +442,80 @@ func TestFetch_RetriesProxyAuthRejectionOnce(t *testing.T) {
 			}
 			if got := p.count("DENY 407"); got != 2 {
 				t.Errorf("407s = %d, want 2 (one retry, no loop): %v", got, p.events())
+			}
+		})
+	}
+}
+
+// si42-proxycmd-flag-only-unparseable-rejection-no-retry: with a transport
+// setup does not own (pilot-daemon's http.DefaultTransport, when the daemon
+// got -proxy-cmd only as a flag), a rejection the proxy garbles ("HTTP/1.1
+// 4O7") never reaches the transport's CONNECT hook, so nothing refreshes on
+// it. get waits a moment and retries once: when the transport's resolver
+// re-read the credentials in the background meanwhile (as netproxy's does
+// once its interval has passed, from the lookup that failed), the retry
+// succeeds; when nothing refreshed, it fails after exactly one retry.
+func TestFetch_RetriesUnreadableProxyReplyOnce(t *testing.T) {
+	old := unreadableReplyRetryDelay
+	unreadableReplyRetryDelay = 100 * time.Millisecond
+	t.Cleanup(func() { unreadableReplyRetryDelay = old })
+	for _, background := range []bool{true, false} {
+		t.Run(fmt.Sprintf("background_refresh=%v", background), func(t *testing.T) {
+			repo := newProxyRepo(t)
+			p := newRotatingProxy(t, repo.srv.Listener.Addr().String())
+			p.garble.Store(true)
+			launchEnv(t, "")
+			home := museProxyHome(t)
+			var cur atomic.Pointer[url.URL]
+			u, _ := url.Parse(p.url(1))
+			cur.Store(u)
+			p.rotate()
+
+			var refreshing atomic.Bool
+			pool := x509.NewCertPool()
+			pool.AddCert(repo.srv.Certificate())
+			tr := &http.Transport{
+				Proxy: func(*http.Request) (*url.URL, error) {
+					// A resolver whose refresh interval has passed starts
+					// a background re-read on a lookup and answers with
+					// the settings in hand.
+					if background && refreshing.CompareAndSwap(false, true) {
+						go func() {
+							time.Sleep(20 * time.Millisecond)
+							fresh, _ := url.Parse(p.url(p.gen.Load()))
+							cur.Store(fresh)
+						}()
+					}
+					return cur.Load(), nil
+				},
+				TLSClientConfig: &tls.Config{RootCAs: pool},
+				// The hook of pilot-daemon's transport; a garbled answer
+				// never reaches it.
+				OnProxyConnectResponse: func(_ context.Context, _ *url.URL, req *http.Request, res *http.Response) error {
+					if res.StatusCode == http.StatusOK {
+						return nil
+					}
+					return &netproxy.ConnectError{Target: req.Host, StatusCode: res.StatusCode}
+				},
+			}
+			cfg := repoConfig(home)
+			cfg.HTTPClient = &http.Client{Transport: tr, Timeout: 10 * time.Second}
+
+			_, err := Tick(context.Background(), cfg)
+			if background {
+				if err != nil {
+					t.Fatalf("Tick: %v\nproxy: %v", err, p.events())
+				}
+				if got := p.count("DENY 407"); got != 1 {
+					t.Errorf("rejections = %d, want 1: %v", got, p.events())
+				}
+				return
+			}
+			if err == nil || !unreadableProxyReply(err) {
+				t.Fatalf("Tick = %v, want the garbled rejection", err)
+			}
+			if got := p.count("DENY 407"); got != 2 {
+				t.Errorf("rejections = %d, want 2 (one retry, no loop): %v", got, p.events())
 			}
 		})
 	}

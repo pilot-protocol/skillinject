@@ -57,7 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"proxy"` set to off/none/no/false/direct turns it off. Without a
   command the client is the plain one, and a 407 reported as a
   `*netproxy.ConnectError` (pilot-daemon's `http.DefaultTransport` does so
-  after refreshing its own credentials) is retried once.
+  after refreshing its own credentials) is retried once; a rejection the
+  proxy garbles ("malformed HTTP status code", Meta Muse's form, which never
+  reaches the transport's CONNECT hook) is retried once after 2s, when the
+  transport's resolver has had a chance to re-read the credentials in the
+  background.
 
 ### Changed
 

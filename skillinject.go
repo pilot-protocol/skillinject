@@ -78,7 +78,7 @@ type Config struct {
 	HTTPClient *http.Client
 	// ProxyCommand is a shell command that prints the current egress
 	// proxy URL, for proxies that rotate the credentials in HTTPS_PROXY
-	// (Meta Muse): e.g. bash -c 'printf %s "${https_proxy:-$HTTPS_PROXY}"'.
+	// (Meta Muse): e.g. bash -c 'printf %s "$https_proxy"' (see proxy.go for the sandbox command).
 	// The default client runs it at the start of each tick, again once a
 	// minute while the tick runs, and when the proxy answers 407, and
 	// retries the refused request once. Empty means $PILOT_PROXY_CMD, then

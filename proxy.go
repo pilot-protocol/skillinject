@@ -14,9 +14,11 @@ package skillinject
 // pilot-daemon handles this with a refresh command, a shell command that
 // prints the current proxy URL (common/netproxy WithRefreshCommand). The
 // daemon takes it from its -proxy-cmd flag, $PILOT_PROXY_CMD, or "proxy_cmd"
-// in ~/.pilot/config.json; the Pilot installers save the Muse one there:
+// in ~/.pilot/config.json. On sandbox hosts the Pilot installer saves the
+// sandbox command there, and pilotctl, pilot-up.sh and pilot-mcp hand it to
+// the daemon as $PILOT_PROXY_CMD:
 //
-//	bash -c 'printf %s "${https_proxy:-$HTTPS_PROXY}"'
+//	bash -c 'case $https_proxy in *@*) printf %s "$https_proxy";; *) printf %s "${HTTPS_PROXY:-$https_proxy}";; esac'
 //
 // When Config.HTTPClient is nil, the client newFetcher builds uses the same
 // command (Config.ProxyCommand, then $PILOT_PROXY_CMD, then config.json):
@@ -26,9 +28,13 @@ package skillinject
 // the plain one it always was, and a fetch the proxy refused with 407 is
 // retried once if the process's transport reports the refusal as a
 // *netproxy.ConnectError, which is what pilot-daemon's http.DefaultTransport
-// does after refreshing its own credentials.
+// does after refreshing its own credentials. A refusal the proxy garbles
+// never reaches that transport's hook; it is retried once after
+// unreadableReplyRetryDelay, by when the transport's resolver has usually
+// re-read the credentials in the background.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -165,4 +171,47 @@ var proxyBaseTransport = func() *http.Transport {
 func proxyAuthRejected(err error) bool {
 	var ce *netproxy.ConnectError
 	return errors.As(err, &ce) && ce.StatusCode == http.StatusProxyAuthRequired
+}
+
+// unreadableReplyRetryDelay is how long get waits before retrying a fetch
+// whose proxy answer could not be parsed (see unreadableProxyReply). A
+// variable so tests can shorten it.
+var unreadableReplyRetryDelay = 2 * time.Second
+
+// unreadableProxyFaults are net/http's complaints about a response it
+// cannot parse (the ones common/netproxy treats as a garbled CONNECT
+// answer). Only these fixed descriptions are matched; the rest of such a
+// message quotes the offending bytes.
+var unreadableProxyFaults = []string{
+	"malformed HTTP status code",
+	"malformed HTTP response",
+	"malformed HTTP version",
+	"malformed MIME header",
+}
+
+// unreadableProxyReply reports whether err is net/http failing to parse a
+// response ("malformed HTTP status code", ...), as it does for a proxy
+// that rejects expired credentials with a garbled CONNECT answer (Meta
+// Muse's). netproxy reports the same case from its own transports as
+// "read CONNECT response: ... (response text withheld)".
+func unreadableProxyReply(err error) bool {
+	msg := err.Error()
+	for _, fault := range unreadableProxyFaults {
+		if strings.Contains(msg, fault) {
+			return true
+		}
+	}
+	return false
+}
+
+// sleepCtx waits d, or until ctx is done; it reports whether d passed.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

@@ -119,12 +119,19 @@ sandboxes (Meta Muse) rotate the credentials in `HTTPS_PROXY` every few
 minutes, and a long-running daemon keeps the ones it was started with. When
 `Config.HTTPClient` is nil, the client re-reads them with the same refresh
 command pilot-daemon uses: `Config.ProxyCommand`, else `$PILOT_PROXY_CMD`,
-else `"proxy_cmd"` in `~/.pilot/config.json` (the Pilot installers save
-`bash -c 'printf %s "${https_proxy:-$HTTPS_PROXY}"'` there on such hosts).
+else `"proxy_cmd"` in `~/.pilot/config.json`. On such hosts the Pilot
+installer (pilot-protocol/release#49) saves the sandbox command there,
+`pilotctl daemon start` (pilotprotocol#470) and pilot-sandbox's `pilot-up.sh`
+hand it to the daemon as `$PILOT_PROXY_CMD`, and pilot-mcp setup does the
+same: `bash -c 'case $https_proxy in *@*) printf %s "$https_proxy";; *) printf %s "${HTTPS_PROXY:-$https_proxy}";; esac'`.
 The command runs at the start of each tick, again once a minute while it
-runs, and when the proxy answers 407, after which the refused request is
-retried once. Its output is never logged. `PILOT_PROXY=off` (or
-`config.json` `"proxy": "off"`) turns this off. See `proxy.go`.
+runs, and when the proxy rejects the credentials (a 407, or an answer
+net/http cannot parse), after which the refused request is retried once.
+Its output is never logged. `PILOT_PROXY=off` (or `config.json` `"proxy":
+"off"`) turns this off. With no command in sight (a daemon given only the
+`-proxy-cmd` flag) the plain client retries a 407 its transport reports
+once, and a garbled rejection once after 2s, which succeeds when the
+daemon's own resolver re-read the credentials meanwhile. See `proxy.go`.
 
 ## Layout
 

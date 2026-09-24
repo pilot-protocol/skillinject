@@ -323,12 +323,27 @@ func decodeEd25519PublicKey(s string) (ed25519.PublicKey, error) {
 
 func (f *fetcher) get(ctx context.Context, url string) ([]byte, error) {
 	resp, err := f.do(ctx, url)
-	if err != nil && !f.ownsTransport && proxyAuthRejected(err) && ctx.Err() == nil {
-		// The proxy refused the credentials, and the transport says so
-		// with a *netproxy.ConnectError: it follows a proxy resolver that
-		// refreshes them on a 407 (pilot-daemon's http.DefaultTransport
-		// does), so a second request goes out with the new ones.
-		resp, err = f.do(ctx, url)
+	if err != nil && !f.ownsTransport && ctx.Err() == nil {
+		switch {
+		case proxyAuthRejected(err):
+			// The proxy refused the credentials, and the transport says so
+			// with a *netproxy.ConnectError: it follows a proxy resolver
+			// that refreshes them on a 407 (pilot-daemon's
+			// http.DefaultTransport does), so a second request goes out
+			// with the new ones.
+			resp, err = f.do(ctx, url)
+		case unreadableProxyReply(err):
+			// An answer net/http could not parse, which is how some
+			// proxies (Meta Muse's) reject expired credentials. The
+			// transport never saw a status, so it refreshed nothing
+			// itself; its resolver re-reads the credentials in the
+			// background once its interval has passed (pilot-daemon's:
+			// 60s, started by the lookup that just failed). Give that a
+			// moment, then retry once.
+			if sleepCtx(ctx, unreadableReplyRetryDelay) {
+				resp, err = f.do(ctx, url)
+			}
+		}
 	}
 	if err != nil {
 		return nil, err
