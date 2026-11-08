@@ -17,8 +17,10 @@
 //   - All injected bytes are fetched at runtime from the PUBLIC pilot-skills
 //     repo (DefaultManifestURL / DefaultRepoBaseURL in manifest.go). Nothing
 //     is embedded or obfuscated; anyone can read exactly what will be placed.
-//   - Optional Ed25519 verification (Config.ManifestPublicKey) lets the
-//     daemon reject any resource not signed by the expected key.
+//   - Every fetched resource must carry an Ed25519 signature by the key
+//     built in as DefaultManifestPublicKeyHex (or an operator's override,
+//     Config.ManifestPublicKey). A tick that meets an unsigned or altered
+//     file writes nothing and keeps the last good state (signature.go).
 //   - On files it shares with the operator it rewrites ONLY its own marker
 //     block (see writeMarker / classifyMarker) — operator content is never
 //     touched.
@@ -38,6 +40,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -86,19 +89,17 @@ type Config struct {
 	// unless PILOT_PROXY or config.json "proxy" turns the proxy off.
 	// Ignored when HTTPClient is set.
 	ProxyCommand string
-	// ManifestPublicKey, when set, enables Ed25519 detached-signature
-	// verification on manifest + all fetched repo files. The daemon
-	// fetches <url>.sig alongside each resource and verifies before
-	// accepting. When nil, the key is resolved from the environment
-	// (EnvManifestPublicKey), then the on-disk trust file
-	// (~/.pilot/skillinject.pub), then the built-in
-	// DefaultManifestPublicKeyHex. If none of those yield a key,
-	// verification is skipped, preserving the pre-verification behavior.
+	// ManifestPublicKey replaces the key that verifies the manifest and
+	// every fetched repo file. Each resource's detached signature is
+	// fetched from <url>.sig and checked before anything is written (see
+	// signature.go). When nil, the key is resolved from the environment
+	// (EnvDaemonManifestPublicKey, then EnvManifestPublicKey), then the
+	// on-disk trust file (~/.pilot/skillinject.pub), then the built-in
+	// DefaultManifestPublicKeyHex. Verification is never skipped.
 	ManifestPublicKey ed25519.PublicKey
-	// RequireSignedManifest makes a verification key mandatory: when true
-	// and no key resolves from any source, every fetch fails instead of
-	// falling back to unverified transport trust. Also settable via
-	// EnvRequireSignedManifest. Default false.
+	// RequireSignedManifest made a verification key mandatory.
+	//
+	// Deprecated: signatures are always required; the field is ignored.
 	RequireSignedManifest bool
 }
 
@@ -229,24 +230,35 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	f := newFetcher(cfg)
 	defer f.close()
 
+	// Fetch and verify everything this tick uses before writing anything.
+	// The manifest, the entrypoint and each file the reconcile steps below
+	// read must carry a valid signature (signature.go). One that does not
+	// stops the tick here: no skill copy, marker, helper, plugin file,
+	// allow-list, retired-surface removal or cache file is touched, so the
+	// host keeps what the last good tick wrote.
 	manifest, err := f.fetchManifest(ctx)
 	if err != nil {
-		return nil, err
+		return nil, unchangedErr(err)
 	}
-	// Cache the manifest so `pilotctl skills disable all` can find everything
-	// we wrote without depending on the network. Best-effort.
-	if manifestBytes, mErr := manifestJSON(manifest); mErr == nil && !dryRun {
-		_ = writeCache(home, manifestCacheRel, manifestBytes)
-	}
-
-	// Fetch entrypoint SKILL.md once; all tools get the same body.
-	entrypointRel := fmt.Sprintf("skills/%s/SKILL.md", manifest.Entrypoint)
+	// All tools get the same entrypoint body; without it the tick stops.
+	entrypointRel := entrypointPath(manifest.Entrypoint)
 	skillBody, err := f.fetchRepoFile(ctx, entrypointRel)
 	if err != nil {
-		return nil, fmt.Errorf("fetch entrypoint %s: %w", entrypointRel, err)
+		return nil, unchangedErr(fmt.Errorf("fetch entrypoint %s: %w", entrypointRel, err))
 	}
+	files, err := prefetch(ctx, f, filesForTick(manifest, home))
+	if err != nil {
+		return nil, unchangedErr(err)
+	}
+	files[entrypointRel] = fetchedFile{body: skillBody}
+
+	// Cache the verified content: the manifest lets `pilotctl skills
+	// disable all` find everything we wrote without the network. Best-effort.
 	if !dryRun {
-		_ = writeCache(home, entrypointRel, skillBody)
+		if manifestBytes, mErr := manifestJSON(manifest); mErr == nil {
+			_ = writeCache(home, manifestCacheRel, manifestBytes)
+		}
+		files.cache(home)
 	}
 
 	skillHash := sha256Hex(skillBody)
@@ -276,7 +288,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	for _, h := range manifest.Helpers {
 		dst := expandHome(h.Dst, home)
 		o := Outcome{Tool: h.Name, Kind: KindHelper, Path: dst}
-		body, err := f.fetchRepoFile(ctx, h.Src)
+		body, err := files.get(h.Src)
 		if err != nil {
 			o.Action = ActionError
 			o.Err = fmt.Sprintf("fetch %s: %v", h.Src, err)
@@ -342,7 +354,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 				Note: fmt.Sprintf("same file as the %s heartbeat (%s), which keeps a single block written for %s", owner.tool, hbKey, owner.tool),
 			})
 		} else {
-			mo, rendered := reconcileMarker(ctx, f, mt, home, skillPath, skillHash, skillShort, hbPath, dryRun)
+			mo, rendered := reconcileMarker(files, mt, skillPath, skillHash, skillShort, hbPath, dryRun)
 			report.Outcomes = append(report.Outcomes, mo)
 			if !rendered {
 				continue
@@ -366,7 +378,7 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 		// surfaces in `pilotctl skills` exactly like the other rows.
 		if mt.Plugin != nil {
 			report.Outcomes = append(report.Outcomes,
-				reconcilePluginFiles(f, ctx, mt.Plugin, home, dryRun)...)
+				reconcilePluginFiles(files, mt.Plugin, home, dryRun)...)
 			if mt.Plugin.AllowList != nil {
 				report.Outcomes = append(report.Outcomes,
 					reconcilePluginAllowList(mt.Plugin, home, dryRun))
@@ -396,13 +408,106 @@ func tick(ctx context.Context, cfg Config, dryRun bool) (*Report, error) {
 	return report, nil
 }
 
-// reconcileMarker fetches and renders mt's heartbeat template, then
+// filesForTick lists the repo files the reconcile steps of tick read for
+// m on this host, besides the entrypoint: each helper's source and, for
+// every tool whose rootDir exists and that has a heartbeat, its template
+// and the source of each plugin file it would write. It may list a file
+// a tick ends up not reading (the plugin of a tool whose template fails
+// to render), never one it reads: the reconcile steps read only what
+// prefetch verified.
+func filesForTick(m *Manifest, home string) []string {
+	var out []string
+	for _, h := range m.Helpers {
+		out = append(out, h.Src)
+	}
+	for _, mt := range m.Tools {
+		if !dirExists(expandHome(mt.RootDir, home)) {
+			continue
+		}
+		if mt.HeartbeatPath == "" || mt.HeartbeatTemplate == "" {
+			continue
+		}
+		out = append(out, mt.HeartbeatTemplate)
+		if mt.Plugin == nil {
+			continue
+		}
+		installDir := expandHome(mt.Plugin.InstallPath, home)
+		for _, pf := range mt.Plugin.Files {
+			if pathWithin(installDir, filepath.Join(installDir, pf.Name)) {
+				out = append(out, pf.Src)
+			}
+		}
+	}
+	return out
+}
+
+// fetchedFile is one prefetched repo file: its verified body, or the error
+// that kept it from being fetched.
+type fetchedFile struct {
+	body []byte
+	err  error
+}
+
+// fetchedFiles maps repo paths to what prefetch got for them.
+type fetchedFiles map[string]fetchedFile
+
+// prefetch fetches and verifies each of names. A file that cannot be
+// fetched is recorded with its error, and the reconcile step that needs it
+// reports an error row as before. A file whose signature is missing or
+// does not verify stops prefetch with that error, and the tick writes
+// nothing.
+func prefetch(ctx context.Context, f *fetcher, names []string) (fetchedFiles, error) {
+	out := fetchedFiles{}
+	for _, n := range names {
+		name := repoPath(n)
+		if _, done := out[name]; done {
+			continue
+		}
+		body, err := f.fetchRepoFile(ctx, name)
+		if errors.Is(err, ErrSignature) {
+			return nil, err
+		}
+		out[name] = fetchedFile{body: body, err: err}
+	}
+	return out, nil
+}
+
+// get returns the prefetched body of repo path p. A path prefetch did not
+// fetch is an error, never a fetch here, so nothing unverified is used.
+func (ff fetchedFiles) get(p string) ([]byte, error) {
+	r, ok := ff[repoPath(p)]
+	if !ok {
+		return nil, fmt.Errorf("%s was not fetched and verified before the write phase", p)
+	}
+	return r.body, r.err
+}
+
+// cache mirrors each verified file under ~/.pilot/skills-cache.
+// Best-effort.
+func (ff fetchedFiles) cache(home string) {
+	for name, r := range ff {
+		if r.err == nil && validRepoPath(name) {
+			_ = writeCache(home, name, r.body)
+		}
+	}
+}
+
+// unchangedErr says, on a signature failure, that the tick changed
+// nothing.
+func unchangedErr(err error) error {
+	if errors.Is(err, ErrSignature) {
+		return fmt.Errorf("%w; nothing changed, keeping what the last good tick wrote", err)
+	}
+	return err
+}
+
+// reconcileMarker renders mt's (prefetched) heartbeat template, then
 // classifies and (unless dryRun) writes its marker block into hbPath. The
 // bool is false when the template could not be fetched or rendered; the
 // Outcome is then an error row and the caller skips the rest of the tool,
 // as it always has.
-func reconcileMarker(ctx context.Context, f *fetcher, mt ManifestTool, home, skillPath, skillHash, skillShort, hbPath string, dryRun bool) (Outcome, bool) {
-	tmplBody, err := f.fetchRepoFile(ctx, mt.HeartbeatTemplate)
+func reconcileMarker(files fetchedFiles, mt ManifestTool, skillPath, skillHash, skillShort, hbPath string, dryRun bool) (Outcome, bool) {
+	tmplBody, err := files.get(mt.HeartbeatTemplate)
 	if err != nil {
 		return Outcome{
 			Tool: mt.Name, Kind: KindMarker,
@@ -410,9 +515,6 @@ func reconcileMarker(ctx context.Context, f *fetcher, mt ManifestTool, home, ski
 			Action: ActionError,
 			Err:    fmt.Sprintf("fetch %s: %v", mt.HeartbeatTemplate, err),
 		}, false
-	}
-	if !dryRun {
-		_ = writeCache(home, mt.HeartbeatTemplate, tmplBody)
 	}
 
 	ref, err := renderHeartbeat(tmplBody, heartbeatVars{EntrypointPath: skillPath})
@@ -452,10 +554,11 @@ func reconcileMarker(ctx context.Context, f *fetcher, mt ManifestTool, home, ski
 	return mo, true
 }
 
-// reconcilePluginFiles fetches and writes each plugin source file. One
-// Outcome per file. Errors are isolated per file: a 404 on one source
-// doesn't block the rest of the plugin from being reconciled.
-func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, home string, dryRun bool) []Outcome {
+// reconcilePluginFiles writes each (prefetched) plugin source file. One
+// Outcome per file. Fetch errors are isolated per file: a 404 on one
+// source doesn't block the rest of the plugin from being reconciled. (A
+// bad signature never gets here: it stops the whole tick.)
+func reconcilePluginFiles(files fetchedFiles, p *ManifestPlugin, home string, dryRun bool) []Outcome {
 	installDir := expandHome(p.InstallPath, home)
 	out := make([]Outcome, 0, len(p.Files))
 	for _, pf := range p.Files {
@@ -469,7 +572,7 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 			})
 			continue
 		}
-		body, err := f.fetchRepoFile(ctx, pf.Src)
+		body, err := files.get(pf.Src)
 		if err != nil {
 			out = append(out, Outcome{
 				Tool: p.ID, Kind: KindPluginFile, Path: dst,
@@ -478,7 +581,6 @@ func reconcilePluginFiles(f *fetcher, ctx context.Context, p *ManifestPlugin, ho
 			})
 			continue
 		}
-		_ = writeCache(home, pf.Src, body)
 		want := sha256Hex(body)
 		state := classifyPluginFile(dst, want)
 		action := actionFor(state)
@@ -555,6 +657,10 @@ func logTick(r *Report, err error) {
 // without anyone asking at that moment, so each one is logged with its
 // path to keep the mechanism auditable.
 func logTickTo(l *slog.Logger, r *Report, err error) {
+	if errors.Is(err, ErrSignature) {
+		l.Warn("skillinject refused content that failed its signature check; nothing changed", "err", err)
+		return
+	}
 	if err != nil {
 		l.Warn("skillinject tick failed", "err", err)
 		return

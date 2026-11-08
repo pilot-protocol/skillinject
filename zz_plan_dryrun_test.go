@@ -14,7 +14,8 @@ import (
 
 // manifestMux serves a minimal but complete inject manifest plus a skill
 // body and heartbeat template, so a full tick has real work to do
-// (create a SKILL.md and a marker in CLAUDE.md).
+// (create a SKILL.md and a marker in CLAUDE.md). Callers sign it with
+// signedHandler.
 func manifestMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -44,13 +45,14 @@ func TestPlan_WritesNothing(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	srv := httptest.NewServer(manifestMux())
+	srv := httptest.NewServer(signedHandler(manifestMux()))
 	defer srv.Close()
 
 	cfg := Config{
-		Home:        home,
-		ManifestURL: srv.URL + "/inject-manifest.json",
-		RepoBaseURL: srv.URL + "/",
+		Home:              home,
+		ManifestURL:       srv.URL + "/inject-manifest.json",
+		RepoBaseURL:       srv.URL + "/",
+		ManifestPublicKey: testPublicKey,
 	}
 
 	rep, err := Plan(context.Background(), cfg)
@@ -97,12 +99,13 @@ func TestPlan_ThenTick_Applies(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	srv := httptest.NewServer(manifestMux())
+	srv := httptest.NewServer(signedHandler(manifestMux()))
 	defer srv.Close()
 	cfg := Config{
-		Home:        home,
-		ManifestURL: srv.URL + "/inject-manifest.json",
-		RepoBaseURL: srv.URL + "/",
+		Home:              home,
+		ManifestURL:       srv.URL + "/inject-manifest.json",
+		RepoBaseURL:       srv.URL + "/",
+		ManifestPublicKey: testPublicKey,
 	}
 
 	if _, err := Plan(context.Background(), cfg); err != nil {

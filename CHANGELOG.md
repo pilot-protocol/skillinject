@@ -7,7 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Signatures are required. Every file a tick fetches (the manifest, the
+  entrypoint `SKILL.md`, heartbeat templates, helper scripts and plugin
+  files) must carry a detached Ed25519 signature at `<url>.sig` by the key
+  now compiled in as `DefaultManifestPublicKeyHex`
+  (`95effdc0863c8e37d65abb292f338856ac703705041a23246c8e468d7426fb31`).
+  Before, verification ran only when an operator set a key, which stock
+  installs never did.
+- Fail closed: a tick fetches and verifies everything it will use before
+  it writes anything. A missing, malformed or non-matching signature on
+  any of those files makes the tick write nothing (no skill copy, marker,
+  helper, plugin file, allow-list change, retired-surface removal or cache
+  file), return an error wrapping `ErrSignature`, and log
+  "skillinject refused content that failed its signature check; nothing
+  changed". The host keeps what the last good tick wrote. `Plan` refuses
+  the same way, and `Uninstall` falls back to the cached manifest. A file
+  that cannot be fetched at all (a 404 on the file itself) is still an
+  error row for that file, as before.
+- The signature covers the file's repo path as well as its bytes
+  (`"pilot-skills-sig-v1" NUL <path> NUL <bytes>`, base64 in the `.sig`),
+  so a signed file cannot be served in place of another.
+
+### Changed
+
+- The key overrides keep working and are the only way to change the key:
+  `Config.ManifestPublicKey`, then `PILOT_SKILLINJECT_MANIFEST_PUBKEY` (the
+  name pilot-daemon reads, now honoured by the library too, so pilotctl
+  verifies with the daemon's key), then `PILOT_SKILLINJECT_PUBKEY`, then
+  `~/.pilot/skillinject.pub`, then the built-in key. An override that does
+  not decode refuses every fetch rather than falling back.
+- `Config.RequireSignedManifest` and `PILOT_SKILLINJECT_REQUIRE_SIG` are
+  deprecated and ignored: there is no unverified mode left to opt out of.
+- A `.sig` is now the base64 text of the signature, not 64 raw bytes.
+
 ### Added
+
+- `cmd/sign-skills`: `sign` writes the `.sig` files for a pilot-skills
+  checkout (key from stdin, a file or an environment variable, never
+  printed; refuses a key other than the built-in one unless `-any-key`),
+  `verify` checks a checkout, `genkey` makes a key into a 0600 file, and
+  `pubkey` prints a key's public half.
+- `SignFile`, `VerifyFile`, `SignedFiles`, `ParsePublicKey`,
+  `ErrSignature`, `SignatureSuffix`, `ManifestName` and
+  `EnvDaemonManifestPublicKey`.
 
 - Gated tools: a new optional manifest key, `gatedTools`, for skill
   targets whose directory is too generic to detect by existence alone.

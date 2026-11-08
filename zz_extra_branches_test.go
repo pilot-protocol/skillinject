@@ -30,6 +30,7 @@ package skillinject
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,11 +42,11 @@ import (
 // fetchManifest: HTTP 200 but body is a manifest with version != 1.
 func TestFetchManifest_RejectsWrongVersion(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(signedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"version": 99, "entrypoint": "x", "tools": [{}]}`))
-	}))
+	})))
 	defer srv.Close()
-	f := newFetcher(Config{ManifestURL: srv.URL + "/m.json"})
+	f := newFetcher(Config{ManifestURL: srv.URL + "/m.json", ManifestPublicKey: testPublicKey})
 	_, err := f.fetchManifest(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "unsupported manifest version") {
 		t.Errorf("expected version error; got %v", err)
@@ -55,11 +56,11 @@ func TestFetchManifest_RejectsWrongVersion(t *testing.T) {
 // fetchManifest: missing entrypoint.
 func TestFetchManifest_RejectsMissingEntrypoint(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(signedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"version": 1, "tools": [{"name":"x"}]}`))
-	}))
+	})))
 	defer srv.Close()
-	f := newFetcher(Config{ManifestURL: srv.URL + "/m.json"})
+	f := newFetcher(Config{ManifestURL: srv.URL + "/m.json", ManifestPublicKey: testPublicKey})
 	_, err := f.fetchManifest(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "entrypoint") {
 		t.Errorf("expected entrypoint error; got %v", err)
@@ -69,11 +70,11 @@ func TestFetchManifest_RejectsMissingEntrypoint(t *testing.T) {
 // fetchManifest: no tools.
 func TestFetchManifest_RejectsEmptyTools(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(signedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"version": 1, "entrypoint":"x", "tools": []}`))
-	}))
+	})))
 	defer srv.Close()
-	f := newFetcher(Config{ManifestURL: srv.URL + "/m.json"})
+	f := newFetcher(Config{ManifestURL: srv.URL + "/m.json", ManifestPublicKey: testPublicKey})
 	_, err := f.fetchManifest(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "no tools") {
 		t.Errorf("expected no-tools error; got %v", err)
@@ -380,7 +381,7 @@ func TestReconcilePluginAllowList_IdenticalNoop(t *testing.T) {
 	}
 }
 
-// getOrVerify: with a valid public key, fetches file + .sig and verifies.
+// getVerified: with a valid public key, fetches file + .sig and verifies.
 func TestFetchManifest_WithValidSignature(t *testing.T) {
 	t.Parallel()
 	pub, priv, err := ed25519.GenerateKey(nil)
@@ -388,7 +389,7 @@ func TestFetchManifest_WithValidSignature(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 	body := []byte(`{"version": 1, "entrypoint": "x", "tools": [{"name":"x"}]}`)
-	sig := ed25519.Sign(priv, body)
+	sig := SignFile(priv, "m.json", body)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, ".sig") {
@@ -412,7 +413,7 @@ func TestFetchManifest_WithValidSignature(t *testing.T) {
 	}
 }
 
-// getOrVerify: wrong public key → signature verification fails.
+// getVerified: wrong public key → signature verification fails.
 func TestFetchManifest_WrongPublicKeyFails(t *testing.T) {
 	t.Parallel()
 	_, priv, err := ed25519.GenerateKey(nil)
@@ -422,7 +423,7 @@ func TestFetchManifest_WrongPublicKeyFails(t *testing.T) {
 	wrongPub, _, _ := ed25519.GenerateKey(nil)
 
 	body := []byte(`{"version": 1, "entrypoint": "x", "tools": [{"name":"x"}]}`)
-	sig := ed25519.Sign(priv, body)
+	sig := SignFile(priv, "m.json", body)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, ".sig") {
@@ -438,15 +439,15 @@ func TestFetchManifest_WrongPublicKeyFails(t *testing.T) {
 		ManifestPublicKey: wrongPub,
 	})
 	_, err = f.fetchManifest(context.Background())
-	if err == nil {
-		t.Fatal("expected signature verification failure")
+	if !errors.Is(err, ErrSignature) {
+		t.Fatalf("expected a signature failure, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "signature verification failed") {
+	if !strings.Contains(err.Error(), "does not match its signature") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
 
-// getOrVerify: missing .sig file returns a wrapped fetch error.
+// getVerified: a missing .sig file is a signature failure.
 func TestFetchManifest_MissingSigFileErrors(t *testing.T) {
 	t.Parallel()
 	pub, _, _ := ed25519.GenerateKey(nil)
@@ -466,10 +467,10 @@ func TestFetchManifest_MissingSigFileErrors(t *testing.T) {
 		ManifestPublicKey: pub,
 	})
 	_, err := f.fetchManifest(context.Background())
-	if err == nil {
-		t.Fatal("expected error when .sig is missing")
+	if !errors.Is(err, ErrSignature) {
+		t.Fatalf("expected a signature failure when .sig is missing, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "fetch signature") {
+	if !strings.Contains(err.Error(), "fetch m.json.sig") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -527,18 +528,22 @@ func TestReconcilePluginFiles_PathTraversalRejected(t *testing.T) {
 
 	// Must set up a real fetcher so the loop doesn't fail on the
 	// good file before we reach the path traversal guard.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(signedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/plugin/index.mjs" {
 			w.Write([]byte("export default {}\n"))
 			return
 		}
 		http.NotFound(w, r)
-	}))
+	})))
 	t.Cleanup(srv.Close)
 
-	f := newFetcher(Config{RepoBaseURL: srv.URL + "/"})
+	f := newFetcher(Config{RepoBaseURL: srv.URL + "/", ManifestPublicKey: testPublicKey})
 
-	out := reconcilePluginFiles(f, context.Background(), p, home, false)
+	files, err := prefetch(context.Background(), f, []string{"plugin/index.mjs"})
+	if err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	out := reconcilePluginFiles(files, p, home, false)
 
 	// First entry (path traversal) should be an error.
 	if len(out) < 2 {
