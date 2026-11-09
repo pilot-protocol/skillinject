@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +99,7 @@ func TestResolveManifestPublicKey_EnvBeatsFile(t *testing.T) {
 	other, _ := newTestKey(t)
 	home := t.TempDir()
 
+	t.Setenv(EnvDaemonManifestPublicKey, "")
 	t.Setenv(EnvManifestPublicKey, base64.StdEncoding.EncodeToString(pub))
 	writeKeyFile(t, home, hex.EncodeToString(other))
 
@@ -114,7 +116,7 @@ func TestResolveManifestPublicKey_FileFallback(t *testing.T) {
 	pub, _ := newTestKey(t)
 	home := t.TempDir()
 
-	t.Setenv(EnvManifestPublicKey, "")
+	clearKeyEnv(t)
 	writeKeyFile(t, home, hex.EncodeToString(pub))
 
 	got, err := resolveManifestPublicKey(Config{Home: home})
@@ -126,18 +128,48 @@ func TestResolveManifestPublicKey_FileFallback(t *testing.T) {
 	}
 }
 
-func TestResolveManifestPublicKey_NoSourceIsNilNoError(t *testing.T) {
-	t.Setenv(EnvManifestPublicKey, "")
+func TestResolveManifestPublicKey_NoOverrideIsBuiltIn(t *testing.T) {
+	clearKeyEnv(t)
 	got, err := resolveManifestPublicKey(Config{Home: t.TempDir()})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got != nil {
-		t.Fatalf("expected nil key when no source supplies one, got %d bytes", len(got))
+	want, err := decodeEd25519PublicKey(DefaultManifestPublicKeyHex)
+	if err != nil {
+		t.Fatalf("built-in key does not decode: %v", err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("with no override the key is not the built-in one")
+	}
+}
+
+// The daemon's variable name works in the library too (pilotctl), and
+// wins over the library's own name, as Config (set from it by the
+// daemon) does in pilot-daemon.
+func TestResolveManifestPublicKey_DaemonEnvName(t *testing.T) {
+	pub, _ := newTestKey(t)
+	other, _ := newTestKey(t)
+	home := t.TempDir()
+	writeKeyFile(t, home, hex.EncodeToString(other))
+
+	t.Setenv(EnvManifestPublicKey, hex.EncodeToString(other))
+	t.Setenv(EnvDaemonManifestPublicKey, base64.StdEncoding.EncodeToString(pub))
+	got, err := resolveManifestPublicKey(Config{Home: home})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !got.Equal(pub) {
+		t.Fatalf("%s did not take precedence", EnvDaemonManifestPublicKey)
+	}
+
+	t.Setenv(EnvDaemonManifestPublicKey, "not-a-key")
+	if _, err := resolveManifestPublicKey(Config{Home: home}); err == nil || !strings.Contains(err.Error(), EnvDaemonManifestPublicKey) {
+		t.Fatalf("a bad %s should be an error naming it, got %v", EnvDaemonManifestPublicKey, err)
 	}
 }
 
 func TestResolveManifestPublicKey_BadEncodingErrors(t *testing.T) {
+	clearKeyEnv(t)
 	t.Setenv(EnvManifestPublicKey, "zzzz-not-a-key")
 	if _, err := resolveManifestPublicKey(Config{Home: t.TempDir()}); err == nil {
 		t.Fatalf("expected an error for an undecodable environment key")
@@ -150,76 +182,79 @@ func TestResolveManifestPublicKey_WrongSizeConfigKeyErrors(t *testing.T) {
 	}
 }
 
-func TestRequireSignedManifest_EnvAndConfig(t *testing.T) {
-	t.Setenv(EnvRequireSignedManifest, "")
-	if requireSignedManifest(Config{}) {
-		t.Fatalf("default should not require a signature")
-	}
-	if !requireSignedManifest(Config{RequireSignedManifest: true}) {
-		t.Fatalf("Config field should require a signature")
-	}
-	for _, v := range []string{"1", "true", "YES"} {
-		t.Setenv(EnvRequireSignedManifest, v)
-		if !requireSignedManifest(Config{}) {
-			t.Errorf("%q should require a signature", v)
-		}
-	}
-	t.Setenv(EnvRequireSignedManifest, "0")
-	if requireSignedManifest(Config{}) {
-		t.Fatalf("%q should not require a signature", "0")
-	}
-}
-
-// TestGetOrVerify_DefaultUnverified pins the backward-compatible default:
-// with no key anywhere, the body is returned and no .sig is requested.
-func TestGetOrVerify_DefaultUnverified(t *testing.T) {
-	t.Setenv(EnvManifestPublicKey, "")
-	t.Setenv(EnvRequireSignedManifest, "")
+// TestGetVerified_DefaultRefusesUnsigned: with no override, a body
+// without a signature is refused (the built-in key is always used).
+func TestGetVerified_DefaultRefusesUnsigned(t *testing.T) {
+	clearKeyEnv(t)
+	t.Setenv(EnvRequireSignedManifest, "0") // deprecated; must not turn verification off
 
 	var sigRequests int
 	srv := newBodyServer(t, []byte("hello"), &sigRequests)
 
 	f := newFetcher(Config{Home: t.TempDir(), HTTPClient: srv.Client()})
-	body, err := f.getOrVerify(context.Background(), srv.URL+"/x")
-	if err != nil {
-		t.Fatalf("getOrVerify: %v", err)
+	_, err := f.getVerified(context.Background(), srv.URL+"/x", "x")
+	if !errors.Is(err, ErrSignature) {
+		t.Fatalf("unsigned body: err = %v, want ErrSignature", err)
 	}
-	if string(body) != "hello" {
-		t.Fatalf("body = %q", body)
-	}
-	if sigRequests != 0 {
-		t.Fatalf("expected no signature fetch, got %d", sigRequests)
+	if sigRequests != 1 {
+		t.Fatalf("expected one signature fetch, got %d", sigRequests)
 	}
 }
 
-// TestGetOrVerify_RequireWithoutKeyFails pins the opt-in strict mode.
-func TestGetOrVerify_RequireWithoutKeyFails(t *testing.T) {
-	t.Setenv(EnvManifestPublicKey, "")
-	t.Setenv(EnvRequireSignedManifest, "")
+// TestGetVerified_DefaultRefusesOtherKey: content signed by any key but
+// the built-in one is refused when nothing overrides the key.
+func TestGetVerified_DefaultRefusesOtherKey(t *testing.T) {
+	clearKeyEnv(t)
+	srv := httptest.NewServer(signedHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("signed by the test key"))
+	})))
+	t.Cleanup(srv.Close)
 
+	f := newFetcher(Config{Home: t.TempDir(), HTTPClient: srv.Client()})
+	if _, err := f.getVerified(context.Background(), srv.URL+"/x", "x"); !errors.Is(err, ErrSignature) {
+		t.Fatalf("err = %v, want ErrSignature", err)
+	}
+}
+
+// TestGetVerified_NoKeyRefuses: a build without a built-in key and no
+// override fetches nothing.
+func TestGetVerified_NoKeyRefuses(t *testing.T) {
 	var sigRequests int
 	srv := newBodyServer(t, []byte("hello"), &sigRequests)
-
-	f := newFetcher(Config{Home: t.TempDir(), HTTPClient: srv.Client(), RequireSignedManifest: true})
-	if _, err := f.getOrVerify(context.Background(), srv.URL+"/x"); err == nil {
-		t.Fatalf("expected an error when a signature is required and no key resolves")
-	} else if !strings.Contains(err.Error(), EnvManifestPublicKey) {
-		t.Fatalf("error should name the environment override, got %v", err)
+	f := &fetcher{httpClient: srv.Client()}
+	_, err := f.getVerified(context.Background(), srv.URL+"/x", "x")
+	if !errors.Is(err, ErrSignature) {
+		t.Fatalf("err = %v, want ErrSignature", err)
+	}
+	if !strings.Contains(err.Error(), EnvManifestPublicKey) || !strings.Contains(err.Error(), EnvDaemonManifestPublicKey) {
+		t.Fatalf("error should name the overrides, got %v", err)
 	}
 }
 
-// TestGetOrVerify_ResolvedKeyVerifies checks that a key supplied purely
+// TestGetVerified_BadKeyRefuses: an override that does not decode stops
+// every fetch rather than falling back to the built-in key.
+func TestGetVerified_BadKeyRefuses(t *testing.T) {
+	clearKeyEnv(t)
+	t.Setenv(EnvManifestPublicKey, "zzzz")
+	var sigRequests int
+	srv := newBodyServer(t, []byte("hello"), &sigRequests)
+	f := newFetcher(Config{Home: t.TempDir(), HTTPClient: srv.Client()})
+	if _, err := f.getVerified(context.Background(), srv.URL+"/x", "x"); !errors.Is(err, ErrSignature) {
+		t.Fatalf("err = %v, want ErrSignature", err)
+	}
+}
+
+// TestGetVerified_ResolvedKeyVerifies checks that a key supplied purely
 // via the trust file is picked up and used to verify.
-func TestGetOrVerify_ResolvedKeyVerifies(t *testing.T) {
-	t.Setenv(EnvManifestPublicKey, "")
-	t.Setenv(EnvRequireSignedManifest, "")
+func TestGetVerified_ResolvedKeyVerifies(t *testing.T) {
+	clearKeyEnv(t)
 
 	pub, priv := newTestKey(t)
 	home := t.TempDir()
 	writeKeyFile(t, home, hex.EncodeToString(pub))
 
 	body := []byte("signed body")
-	sig := ed25519.Sign(priv, body)
+	sig := SignFile(priv, "x", body)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/x", func(w http.ResponseWriter, _ *http.Request) { w.Write(body) })
@@ -230,16 +265,27 @@ func TestGetOrVerify_ResolvedKeyVerifies(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	f := newFetcher(Config{Home: home, HTTPClient: srv.Client()})
-	got, err := f.getOrVerify(context.Background(), srv.URL+"/x")
+	got, err := f.getVerified(context.Background(), srv.URL+"/x", "x")
 	if err != nil {
-		t.Fatalf("getOrVerify: %v", err)
+		t.Fatalf("getVerified: %v", err)
 	}
 	if string(got) != string(body) {
 		t.Fatalf("body = %q", got)
 	}
-	if _, err := f.getOrVerify(context.Background(), srv.URL+"/bad"); err == nil {
-		t.Fatalf("expected verification failure on a mismatched body")
+	if _, err := f.getVerified(context.Background(), srv.URL+"/bad", "bad"); !errors.Is(err, ErrSignature) {
+		t.Fatalf("expected verification failure on a mismatched body, got %v", err)
 	}
+	// The signature covers the name: the same bytes under another name fail.
+	if _, err := f.getVerified(context.Background(), srv.URL+"/x", "y"); !errors.Is(err, ErrSignature) {
+		t.Fatalf("expected verification failure under another name, got %v", err)
+	}
+}
+
+// clearKeyEnv removes key overrides a developer's shell may carry.
+func clearKeyEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(EnvManifestPublicKey, "")
+	t.Setenv(EnvDaemonManifestPublicKey, "")
 }
 
 func writeKeyFile(t *testing.T, home, contents string) {

@@ -141,7 +141,7 @@ func TestGatedManifest_FetchAndCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(signedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch strings.TrimPrefix(r.URL.Path, "/") {
 		case "inject-manifest.json":
 			_, _ = w.Write(body)
@@ -150,11 +150,11 @@ func TestGatedManifest_FetchAndCache(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 	defer srv.Close()
 
 	home := t.TempDir()
-	cfg := Config{Home: home, ManifestURL: srv.URL + "/inject-manifest.json", RepoBaseURL: srv.URL + "/"}
+	cfg := Config{Home: home, ManifestURL: srv.URL + "/inject-manifest.json", RepoBaseURL: srv.URL + "/", ManifestPublicKey: testPublicKey}
 	if _, err := Tick(context.Background(), cfg); err != nil {
 		t.Fatalf("Tick: %v", err)
 	}

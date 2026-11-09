@@ -153,8 +153,8 @@ func (p *rotatingProxy) handle(c net.Conn) {
 }
 
 // proxyRepo is a TLS pilot-skills stand-in: a manifest with the claude-code
-// tool and the gated muse row, and the entrypoint SKILL.md. onManifest runs
-// before the manifest is served.
+// tool and the gated muse row, and the entrypoint SKILL.md, signed with the
+// test key. onManifest runs before the manifest is served.
 type proxyRepo struct {
 	srv        *httptest.Server
 	onManifest func(w http.ResponseWriter)
@@ -175,7 +175,7 @@ func newProxyRepo(t *testing.T) *proxyRepo {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	r.srv = httptest.NewTLSServer(signedHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		switch strings.TrimPrefix(req.URL.Path, "/") {
 		case "inject-manifest.json":
 			if r.onManifest != nil {
@@ -187,7 +187,7 @@ func newProxyRepo(t *testing.T) *proxyRepo {
 		default:
 			http.NotFound(w, req)
 		}
-	}))
+	})))
 	t.Cleanup(r.srv.Close)
 	return r
 }
@@ -242,9 +242,10 @@ func launchEnv(t *testing.T, proxyURL string) {
 
 func repoConfig(home string) Config {
 	return Config{
-		Home:        home,
-		ManifestURL: "https://example.com/inject-manifest.json",
-		RepoBaseURL: "https://example.com/",
+		Home:              home,
+		ManifestURL:       "https://example.com/inject-manifest.json",
+		RepoBaseURL:       "https://example.com/",
+		ManifestPublicKey: testPublicKey,
 	}
 }
 

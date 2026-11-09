@@ -29,9 +29,19 @@ to be earned with full transparency, so here is the whole story:
   AGPL-3.0. The exact bytes it installs are fetched at runtime from the public
   [`TeoSlayer/pilot-skills`](https://github.com/TeoSlayer/pilot-skills) repo
   (`inject-manifest.json` → `skills/*/SKILL.md` + `heartbeats/*.md`); nothing
-  is embedded or hidden. Optional Ed25519 detached-signature verification
-  (`Config.ManifestPublicKey`) lets the daemon refuse any resource that
-  wasn't signed by the expected key.
+  is embedded or hidden.
+- **Everything injected is signed.** Each file the injector fetches (the
+  manifest, `SKILL.md`, heartbeat templates, helper scripts, plugin files)
+  needs a detached Ed25519 signature next to it (`<file>.sig`) by the key
+  built in as `DefaultManifestPublicKeyHex`. A tick fetches and checks all
+  of them before it writes anything: if one is unsigned, signed by another
+  key or changed after signing, it writes nothing, keeps what the last good
+  tick installed, and logs why. A signature covers the file's repo path as
+  well as its bytes, so a signed file cannot stand in for another. An
+  operator running a fork of pilot-skills replaces the key with
+  `PILOT_SKILLINJECT_MANIFEST_PUBKEY` or `PILOT_SKILLINJECT_PUBKEY` (hex or
+  base64) or `~/.pilot/skillinject.pub`; verification itself cannot be
+  turned off. `cmd/sign-skills` writes the signatures (see below).
 - **It is non-destructive.** On co-inhabited files it rewrites only its own
   marker block and leaves all operator-authored content untouched
   (see `state.go`/`reconcile.go`). The block is inserted as literal text
@@ -133,13 +143,39 @@ Its output is never logged. `PILOT_PROXY=off` (or `config.json` `"proxy":
 once, and a garbled rejection once after 2s, which succeeds when the
 daemon's own resolver re-read the credentials meanwhile. See `proxy.go`.
 
+### Signing pilot-skills
+
+`cmd/sign-skills` signs `inject-manifest.json` and every file it lists (the
+`src` and `heartbeatTemplate` values at any depth, outside `retired`, plus
+the entrypoint `SKILL.md`; see `SignedFiles`) and writes `<file>.sig` next
+to each. A `.sig` holds the base64 Ed25519 signature over
+`"pilot-skills-sig-v1" NUL <repo path> NUL <file bytes>`. The private key is
+read from stdin (or `-key FILE`, `-key-env NAME`) and never printed; `sign`
+refuses a key whose public half is not the built-in one unless `-any-key`.
+
+```sh
+# The owner's key lives in the macOS login keychain:
+security find-generic-password -s pilot-skills-signing -a "$USER" -w |
+    go run github.com/pilot-protocol/skillinject/cmd/sign-skills@latest sign -repo ~/work/pilot-skills
+
+# Check a checkout against the built-in key (or -pubkey KEY):
+go run github.com/pilot-protocol/skillinject/cmd/sign-skills@latest verify -repo ~/work/pilot-skills
+```
+
+`genkey -out FILE` makes a new key (seed in hex, mode 0600, public key
+printed) and `pubkey` prints the public half of a key read from stdin.
+Every content change in pilot-skills has to be signed again before hosts on
+this release pick it up; until then they keep what they have.
+
 ## Layout
 
 | File | What it does |
 |---|---|
 | `skillinject.go` | Entry point — `Run(ctx, Config)` reconcile loop and manifest fetch. |
 | `config.go` | `Config` struct (install paths, marker, fetch URL). |
-| `manifest.go` | Parses the manifest JSON fetched from the pilot-skills repo. |
+| `manifest.go` | Parses the manifest JSON fetched from the pilot-skills repo; resolves the verification key. |
+| `signature.go` | Signature format (`SignFile`, `VerifyFile`) and the list of files a manifest makes the injector fetch (`SignedFiles`). |
+| `cmd/sign-skills/` | Signs pilot-skills content and verifies a checkout. |
 | `reconcile.go` | Per-tick state machine: Absent → install, Drifted → rewrite, Identical → noop. |
 | `state.go` | File-state classifier (sha256 + heartbeat-marker parsing). |
 | `uninstall.go` | Strip-only on co-inhabited files; delete-safe in pilot-owned subdirs. |

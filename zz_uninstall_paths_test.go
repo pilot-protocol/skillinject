@@ -38,7 +38,7 @@ func TestLoadManifestForUninstall_NetworkPath(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(signedHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "inject-manifest.json") {
 			m := Manifest{
 				Version:    1,
@@ -51,13 +51,15 @@ func TestLoadManifestForUninstall_NetworkPath(t *testing.T) {
 			return
 		}
 		http.NotFound(w, r)
-	}))
+	})))
 	defer srv.Close()
 
 	cfg := Config{
 		Home:        home,
 		ManifestURL: srv.URL + "/inject-manifest.json",
 		RepoBaseURL: srv.URL + "/",
+		// Signed with the test key.
+		ManifestPublicKey: testPublicKey,
 	}
 	m, offline, err := loadManifestForUninstall(context.Background(), cfg, home)
 	if err != nil {

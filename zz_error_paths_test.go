@@ -295,7 +295,11 @@ func TestReconcilePluginFiles_FetchErrorSurfaces(t *testing.T) {
 			{Name: "openclaw.plugin.json", Src: "plugin/openclaw.plugin.json"},
 		},
 	}
-	outs := reconcilePluginFiles(f, context.Background(), p, home, false)
+	files, err := prefetch(context.Background(), f, []string{"plugin/openclaw.plugin.json"})
+	if err != nil {
+		t.Fatalf("prefetch: %v", err)
+	}
+	outs := reconcilePluginFiles(files, p, home, false)
 	if len(outs) != 1 {
 		t.Fatalf("expected 1 outcome; got %d", len(outs))
 	}
@@ -331,13 +335,14 @@ func TestTick_HeartbeatTemplateFetchFails(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	})
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(signedHandler(mux))
 	defer srv.Close()
 
 	cfg := Config{
-		Home:        home,
-		ManifestURL: srv.URL + "/inject-manifest.json",
-		RepoBaseURL: srv.URL + "/",
+		Home:              home,
+		ManifestURL:       srv.URL + "/inject-manifest.json",
+		RepoBaseURL:       srv.URL + "/",
+		ManifestPublicKey: testPublicKey,
 	}
 	rep, err := Tick(context.Background(), cfg)
 	if err != nil {
@@ -373,13 +378,14 @@ func TestTick_EntrypointSkillFetchFails(t *testing.T) {
 		// Every other fetch (incl. skills/pilotctl/SKILL.md) 404s.
 		http.NotFound(w, r)
 	})
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(signedHandler(mux))
 	defer srv.Close()
 
 	cfg := Config{
-		Home:        home,
-		ManifestURL: srv.URL + "/inject-manifest.json",
-		RepoBaseURL: srv.URL + "/",
+		Home:              home,
+		ManifestURL:       srv.URL + "/inject-manifest.json",
+		RepoBaseURL:       srv.URL + "/",
+		ManifestPublicKey: testPublicKey,
 	}
 	_, err := Tick(context.Background(), cfg)
 	if err == nil {
@@ -417,13 +423,14 @@ func TestTick_HeartbeatTemplateRenderError(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	})
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(signedHandler(mux))
 	defer srv.Close()
 
 	cfg := Config{
-		Home:        home,
-		ManifestURL: srv.URL + "/inject-manifest.json",
-		RepoBaseURL: srv.URL + "/",
+		Home:              home,
+		ManifestURL:       srv.URL + "/inject-manifest.json",
+		RepoBaseURL:       srv.URL + "/",
+		ManifestPublicKey: testPublicKey,
 	}
 	rep, err := Tick(context.Background(), cfg)
 	if err != nil {

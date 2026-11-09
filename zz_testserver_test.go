@@ -38,7 +38,8 @@ func newFakeRepo(t *testing.T) *fakeRepo {
 		}
 		http.NotFound(w, req)
 	})
-	r.srv = httptest.NewServer(mux)
+	// Everything served is signed with the test key cfg trusts.
+	r.srv = httptest.NewServer(skillinject.SignedHandlerForTest(mux))
 	t.Cleanup(r.srv.Close)
 	return r
 }
@@ -68,9 +69,10 @@ func (r *fakeRepo) withTools(tools []skillinject.ManifestTool) {
 // cfg returns a skillinject.Config wired to point at the fake server.
 func (r *fakeRepo) cfg(home string) skillinject.Config {
 	return skillinject.Config{
-		Home:        home,
-		ManifestURL: r.srv.URL + "/inject-manifest.json",
-		RepoBaseURL: r.srv.URL + "/",
+		Home:              home,
+		ManifestURL:       r.srv.URL + "/inject-manifest.json",
+		RepoBaseURL:       r.srv.URL + "/",
+		ManifestPublicKey: skillinject.TestPublicKeyForTest,
 	}
 }
 
